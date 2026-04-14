@@ -4,7 +4,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import SessionLocal
 from database.crud import list_telegram_ids
-from retrospective import build_user_retrospective
+from modules.retrospective import build_user_retrospective
 
 
 
