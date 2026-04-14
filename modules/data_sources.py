@@ -9,7 +9,7 @@ from typing import Any
 
 import requests
 
-from ..config import settings
+from config import settings
 
 
 STATSBOMB_XG_EVENT_TYPES = {"Shot"}
