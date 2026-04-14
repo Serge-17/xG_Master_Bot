@@ -6,10 +6,11 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from aiogram import Bot
 from aiogram.types import Update
 
-from .config import settings
-from .database import init_db
-from .main import dp
-from .modules.scheduler import register_reporting_jobs, start_scheduler, stop_scheduler
+from config import settings
+from database import init_db
+from main import dp
+from modules.scheduler import register_reporting_jobs, start_scheduler, stop_scheduler
+
 
 
 app = FastAPI(title="xG-Master Bot API")
