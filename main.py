@@ -17,9 +17,9 @@ from aiogram.types import (
 )
 import requests
 
-from .config import settings
-from .database import SessionLocal, init_db
-from .database.crud import (
+from config import settings
+from database import SessionLocal, init_db
+from database.crud import (
     create_coupon,
     create_prediction,
     get_recent_predictions,
@@ -32,14 +32,14 @@ from .database.crud import (
     update_prediction_result,
     update_coupon_settlement,
 )
-from .modules.ai_analyst import generate_prediction, generate_russian_post, analyze_news_sentiment
-from .modules.bankroll_manager import recommended_stake
-from .modules.data_sources import build_match_context
-from .modules.news_parser import build_news_summary
-from .modules.ocr_processor import interpret_result, process_coupon_image
-from .modules.retrospective import build_user_retrospective
-from .modules.scheduler import register_reporting_jobs, start_scheduler
-from .utils.helpers import format_money, parse_float
+from modules.ai_analyst import generate_prediction, generate_russian_post, analyze_news_sentiment
+from modules.bankroll_manager import recommended_stake
+from modules.data_sources import build_match_context
+from modules.news_parser import build_news_summary
+from modules.ocr_processor import interpret_result, process_coupon_image
+from modules.retrospective import build_user_retrospective
+from modules.scheduler import register_reporting_jobs, start_scheduler
+from utils.helpers import format_money, parse_float
 
 
 logging.basicConfig(level=logging.INFO)
