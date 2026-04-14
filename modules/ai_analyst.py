@@ -6,7 +6,6 @@ from dataclasses import asdict
 from typing import Any
 
 import requests
-
 from config import settings
 from bankroll_manager import recommended_stake
 from data_sources import TeamContext
