@@ -7,9 +7,9 @@ from typing import Any
 
 import requests
 
-from ..config import settings
-from .bankroll_manager import recommended_stake
-from .data_sources import TeamContext
+from config import settings
+from bankroll_manager import recommended_stake
+from data_sources import TeamContext
 
 logger = logging.getLogger(__name__)
 
