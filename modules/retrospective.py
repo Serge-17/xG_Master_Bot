@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict
 from statistics import mean
 
-from ..database.crud import get_settled_predictions, get_user_summary
-from .ai_analyst import build_retro_report
+from database.crud import get_settled_predictions, get_user_summary
+from modules.ai_analyst import build_retro_report
 
 
 def _prediction_to_payload(prediction) -> dict[str, object]:
