@@ -5,7 +5,7 @@ from pathlib import Path
 import base64
 import json
 
-from ..config import settings
+from config import settings
 
 
 OUTCOME_PATTERNS = {
