@@ -39,13 +39,13 @@ from modules.ai_analyst import (
     generate_prediction,
 )
 from modules.bankroll_manager import recommended_stake
-from modules.data_sources import build_match_context
+from modules.data_sources import build_match_context, list_fixtures_for_date
 from modules.daily_digest import (
     apply_bankroll_to_recommendations,
     build_daily_recommendations,
     format_user_digest,
 )
-from modules.localization import parse_matchup, translate_market, translate_outcome
+from modules.localization import parse_matchup, resolve_league_name, translate_market, translate_outcome
 from modules.news_parser import build_news_summary
 from modules.ocr_processor import interpret_result, process_coupon_image
 from modules.retrospective import build_user_retrospective
@@ -67,6 +67,20 @@ download_root.mkdir(parents=True, exist_ok=True)
 class MatchScan(StatesGroup):
     waiting_league = State()
     waiting_teams = State()
+
+
+TOP_LEAGUES: list[tuple[str, str]] = [
+    ("Премьер-лига", "premier league"),
+    ("Ла Лига", "la liga"),
+    ("Серия А", "serie a"),
+    ("Бундеслига", "bundesliga"),
+    ("Лига 1", "ligue 1"),
+    ("Лига чемпионов", "champions league"),
+    ("Чемпионшип", "championship"),
+    ("Эредивизи", "eredivisie"),
+    ("Примейра", "primeira liga"),
+    ("Евро матчи", "europe"),
+]
 
 
 class BankrollSetup(StatesGroup):
@@ -113,7 +127,7 @@ def settings_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="💰 Установить банк", callback_data="set_bankroll"),
-                InlineKeyboardButton(text="📐 Стратегия: Flat", callback_data="set_flat"),
+                InlineKeyboardButton(text="🛡 Резерв банка", callback_data="show_reserve"),
             ],
             [
                 InlineKeyboardButton(text="📐 Стратегия: Kelly", callback_data="set_kelly"),
@@ -123,10 +137,134 @@ def settings_kb() -> InlineKeyboardMarkup:
     )
 
 
+def top_leagues_kb() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index in range(0, len(TOP_LEAGUES), 2):
+        chunk = TOP_LEAGUES[index:index + 2]
+        rows.append(
+            [
+                InlineKeyboardButton(text=display_name, callback_data=f"pick_league_{league_key}")
+                for display_name, league_key in chunk
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_match_buttons(fixtures: list[dict[str, str]]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{fixture['home_team']} - {fixture['away_team']}",
+                callback_data=f"pick_match_{index}",
+            )
+        ]
+        for index, fixture in enumerate(fixtures)
+    ]
+    rows.append([InlineKeyboardButton(text="◀️ К лигам", callback_data="menu_predict")])
+    rows.append([InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows[:20])
+
+
 # ── Session helper ──────────────────────────────────────────────────────────
 
 def get_session():
     return SessionLocal()
+
+
+def _fixtures_for_manual_league(league_key: str) -> tuple[str, list[dict[str, str]]]:
+    target_date = datetime.now().date()
+    fixtures_today = list_fixtures_for_date(target_date, limit=250)
+    if league_key == "europe":
+        accepted = {"champions league", "europa league", "conference league"}
+        selected_rows = fixtures_today
+        selected_rows = [row for row in selected_rows if resolve_league_name(row.league)[0] in accepted]
+        display_name = "Евро матчи"
+    else:
+        selected_rows = [row for row in fixtures_today if resolve_league_name(row.league)[0] == league_key]
+        display_name = next((name for name, key in TOP_LEAGUES if key == league_key), league_key)
+
+    fixtures = [
+        {
+            "league": row.league,
+            "home_team": row.home_team,
+            "away_team": row.away_team,
+            "kickoff": row.kickoff or "",
+        }
+        for row in selected_rows[:15]
+    ]
+    return display_name, fixtures
+
+
+def _build_matches_text(league_name: str, fixtures: list[dict[str, str]]) -> str:
+    lines = [f"⚽ <b>{league_name}</b>", f"Матчи на {datetime.now().strftime('%d.%m.%Y')}:", ""]
+    for index, fixture in enumerate(fixtures, start=1):
+        kickoff = f"{fixture['kickoff']} " if fixture["kickoff"] else ""
+        lines.append(f"{index}. {kickoff}{fixture['home_team']} - {fixture['away_team']}")
+    lines.append("")
+    lines.append("Выберите матч кнопкой ниже.")
+    return "\n".join(lines)
+
+
+def _generate_prediction_payload(telegram_id: int, league: str, home_team: str, away_team: str) -> dict[str, object]:
+    with get_session() as session:
+        summary = get_user_summary(session, telegram_id)
+
+    bankroll = float(summary["bankroll"])
+    strategy = str(summary["bankroll_strategy"])
+    flat_percent = float(summary["flat_percent"]) / 100.0
+    kelly_cap = float(summary["kelly_fraction_limit"]) / 100.0
+
+    match_context = build_match_context(league, home_team.strip(), away_team.strip())
+    news_home = build_news_summary(team_name=home_team.strip(), max_items=3)
+    news_away = build_news_summary(team_name=away_team.strip(), max_items=3)
+    sentiment_home = analyze_news_sentiment(news_home, home_team.strip())
+    sentiment_away = analyze_news_sentiment(news_away, away_team.strip())
+
+    odds_for_strategy = match_context.odds.get("home") if match_context.odds else None
+    ai_result = generate_prediction(match_context, bankroll)
+    stake = recommended_stake(
+        bankroll=bankroll,
+        confidence=float(ai_result["confidence"]),
+        odds=odds_for_strategy,
+        strategy=strategy,
+        flat_percent=flat_percent,
+        kelly_cap=kelly_cap,
+    )
+
+    with get_session() as session:
+        created = create_prediction(
+            session=session,
+            telegram_id=telegram_id,
+            match_info=f"{league} {home_team.strip()} - {away_team.strip()}",
+            ai_prediction=str(ai_result["prediction"]),
+            ai_reasoning=str(ai_result["reasoning"]),
+            confidence=int(ai_result["confidence"]),
+            recommended_amount=float(stake),
+        )
+        record_transaction(
+            session=session,
+            telegram_id=telegram_id,
+            transaction_type="Bet",
+            amount=float(stake),
+            prediction_id=created.id,
+        )
+        created_id = int(created.id)
+
+    return {
+        "text": format_prediction_message(
+            match=match_context,
+            prediction=str(ai_result["prediction"]),
+            reasoning=str(ai_result["reasoning"]),
+            confidence=int(ai_result["confidence"]),
+            stake=float(stake),
+            bankroll=bankroll,
+            news_sentiment_home=sentiment_home,
+            news_sentiment_away=sentiment_away,
+            prediction_id=created_id,
+        ),
+        "prediction_id": created_id,
+    }
 
 
 def build_personal_today_digest(telegram_id: int, limit: int | None = None) -> str:
@@ -169,7 +307,7 @@ async def help_handler(message: Message) -> None:
         "/set_strategy &lt;flat|kelly&gt; [%] [kelly_cap%] — стратегия\n"
         "/my_bankroll — банк и статистика\n"
         "/today — подборка матчей на сегодня\n"
-        "/predict &lt;лига&gt; &lt;команда1&gt; vs &lt;команда2&gt; — прогноз\n"
+        "/predict &lt;лига&gt; ; &lt;команда1&gt; - &lt;команда2&gt; — прогноз\n"
         "/my_predictions — последние прогнозы\n"
         "/close_prediction &lt;id&gt; &lt;win|loss|refund&gt; &lt;сумма&gt; — закрыть\n"
         "/retro_report — ретроспективный отчёт\n"
@@ -208,7 +346,8 @@ async def cb_bank(call: CallbackQuery) -> None:
         f"❌ Проигрыши: {format_money(summary['total_losses'])} руб.\n"
         f"🔄 Возвраты: {summary['total_refunds']}\n\n"
         f"⚙️ Стратегия: {summary['bankroll_strategy'].upper()}\n"
-        f"📐 Flat %: {summary['flat_percent']}% | Kelly cap: {summary['kelly_fraction_limit']}%"
+        f"🛡 Резерв банка: {round(settings.reserve_bankroll_fraction * 100, 2)}%\n"
+        f"📐 Kelly cap: {summary['kelly_fraction_limit']}%"
     )
     await call.message.edit_text(text, reply_markup=back_kb(), parse_mode="HTML")
     await call.answer()
@@ -291,7 +430,7 @@ async def cb_settings(call: CallbackQuery) -> None:
     text = (
         "⚙️ <b>Настройки</b>\n\n"
         f"Текущая стратегия: <b>{summary['bankroll_strategy'].upper()}</b>\n"
-        f"Flat %: {summary['flat_percent']}%\n"
+        f"Резерв банка: {round(settings.reserve_bankroll_fraction * 100, 2)}%\n"
         f"Kelly cap: {summary['kelly_fraction_limit']}%\n\n"
         "Выберите действие:"
     )
@@ -327,14 +466,12 @@ async def process_bankroll_amount(message: Message, state: FSMContext) -> None:
     )
 
 
-@dp.callback_query(F.data == "set_flat")
-async def cb_set_flat(call: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(StrategySetup.waiting_params)
-    await state.update_data(strategy="flat")
+@dp.callback_query(F.data == "show_reserve")
+async def cb_show_reserve(call: CallbackQuery) -> None:
     await call.message.edit_text(
-        "📐 <b>Стратегия: Flat</b>\n\n"
-        "Введите процент от банка для каждой ставки:\n"
-        "Например: <code>3</code> (= 3% от банка)",
+        "🛡 <b>Резерв банка</b>\n\n"
+        f"Сейчас бот всегда оставляет в резерве <b>{round(settings.reserve_bankroll_fraction * 100, 2)}%</b> банка.\n"
+        "Оставшаяся часть используется как рекомендуемая сумма ставки.",
         reply_markup=back_kb(),
         parse_mode="HTML",
     )
@@ -374,7 +511,8 @@ async def process_strategy_params(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         f"✅ Стратегия <b>{strategy.upper()}</b> установлена!\n"
-        f"Flat %: {round(user.flat_percent * 100, 2)}% | Kelly cap: {round(user.kelly_fraction_limit * 100, 2)}%",
+        f"🛡 Резерв банка: {round(settings.reserve_bankroll_fraction * 100, 2)}% | "
+        f"Kelly cap: {round(user.kelly_fraction_limit * 100, 2)}%",
         reply_markup=main_menu_kb(),
         parse_mode="HTML",
     )
@@ -384,126 +522,78 @@ async def process_strategy_params(message: Message, state: FSMContext) -> None:
 
 @dp.callback_query(F.data == "menu_predict")
 async def cb_predict_start(call: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(MatchScan.waiting_league)
+    await state.clear()
     await call.message.edit_text(
         "🔍 <b>Поиск матча</b>\n\n"
-        "Введите название лиги:\n"
-        "Например: <code>Премьер-лига</code>, <code>Ла Лига</code>, <code>Серия А</code>, <code>Лига чемпионов</code>",
-        reply_markup=back_kb(),
+        "Выберите чемпионат из топ-10 лиг ниже, и я покажу матчи, которые идут сегодня.",
+        reply_markup=top_leagues_kb(),
         parse_mode="HTML",
     )
     await call.answer()
 
 
-@dp.message(MatchScan.waiting_league)
-async def process_league(message: Message, state: FSMContext) -> None:
-    await state.update_data(league=message.text or "")
-    await state.set_state(MatchScan.waiting_teams)
-    await message.answer(
-        "⚽ Введите команды в формате:\n<code>Команда1 - Команда2</code>\n\n"
-        "Можно писать и так: <code>Арсенал vs Челси</code>\n"
-        "Например: <code>Барселона - Атлетико</code>",
-        reply_markup=back_kb(),
-        parse_mode="HTML",
-    )
+@dp.callback_query(F.data.startswith("pick_league_"))
+async def cb_pick_league(call: CallbackQuery, state: FSMContext) -> None:
+    league_key = call.data.replace("pick_league_", "", 1)
+    league_name, fixtures = _fixtures_for_manual_league(league_key)
+    await state.clear()
+    await state.update_data(manual_league=league_name, manual_fixtures=fixtures)
 
-
-@dp.message(MatchScan.waiting_teams)
-async def process_teams(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    parsed_match = parse_matchup(raw)
-    if parsed_match is None:
-        await message.answer(
-            "❌ Формат не распознан.\nИспользуйте, например: <code>Арсенал - Бавария</code>",
+    if not fixtures:
+        await call.message.edit_text(
+            f"⚠️ <b>{league_name}</b>\n\nНа сегодня в доступном источнике матчей не найдено.\n"
+            "Попробуйте другую лигу.",
+            reply_markup=top_leagues_kb(),
             parse_mode="HTML",
         )
+        await call.answer()
         return
 
-    home_team, away_team = parsed_match
-    data = await state.get_data()
-    league = data.get("league", "Неизвестная лига")
-    await state.clear()
-
-    wait_msg = await message.answer("⏳ Анализирую матч, собираю данные...")
-
-    # Данные матча
-    with get_session() as session:
-        summary = get_user_summary(session, message.from_user.id)
-
-    bankroll = float(summary["bankroll"])
-    strategy = str(summary["bankroll_strategy"])
-    flat_percent = float(summary["flat_percent"]) / 100.0
-    kelly_cap = float(summary["kelly_fraction_limit"]) / 100.0
-
-    match_context = build_match_context(league, home_team.strip(), away_team.strip())
-
-    # Новости
-    news_home = build_news_summary(team_name=home_team.strip(), max_items=3)
-    news_away = build_news_summary(team_name=away_team.strip(), max_items=3)
-    sentiment_home = analyze_news_sentiment(news_home, home_team.strip())
-    sentiment_away = analyze_news_sentiment(news_away, away_team.strip())
-
-    # AI прогноз
-    odds_for_strategy = match_context.odds.get("home") if match_context.odds else None
-    ai_result = generate_prediction(match_context, bankroll)
-    stake = recommended_stake(
-        bankroll=bankroll,
-        confidence=float(ai_result["confidence"]),
-        odds=odds_for_strategy,
-        strategy=strategy,
-        flat_percent=flat_percent,
-        kelly_cap=kelly_cap,
+    await call.message.edit_text(
+        _build_matches_text(league_name, fixtures),
+        reply_markup=build_match_buttons(fixtures),
+        parse_mode="HTML",
     )
+    await call.answer()
 
-    # Сохранение
-    with get_session() as session:
-        created = create_prediction(
-            session=session,
-            telegram_id=message.from_user.id,
-            match_info=f"{league} {home_team.strip()} - {away_team.strip()}",
-            ai_prediction=str(ai_result["prediction"]),
-            ai_reasoning=str(ai_result["reasoning"]),
-            confidence=int(ai_result["confidence"]),
-            recommended_amount=float(stake),
-        )
-        record_transaction(
-            session=session,
-            telegram_id=message.from_user.id,
-            transaction_type="Bet",
-            amount=float(stake),
-            prediction_id=created.id,
-        )
-        created_id = int(created.id)
 
-    await wait_msg.delete()
+@dp.callback_query(F.data.startswith("pick_match_"))
+async def cb_pick_match(call: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    fixtures = data.get("manual_fixtures", [])
+    try:
+        match_index = int(call.data.replace("pick_match_", "", 1))
+        fixture = fixtures[match_index]
+    except (ValueError, IndexError, TypeError):
+        await call.answer("Матч не найден, выберите его заново.", show_alert=True)
+        return
 
+    wait_message = await call.message.answer("⏳ Анализирую матч, собираю коэффициенты и ставку...")
+    prediction_payload = _generate_prediction_payload(
+        telegram_id=call.from_user.id,
+        league=str(fixture["league"]),
+        home_team=str(fixture["home_team"]),
+        away_team=str(fixture["away_team"]),
+    )
+    await wait_message.delete()
+
+    prediction_id = int(prediction_payload["prediction_id"])
     close_kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Выиграл", callback_data=f"settle_{created_id}_win"),
-                InlineKeyboardButton(text="❌ Проиграл", callback_data=f"settle_{created_id}_loss"),
-                InlineKeyboardButton(text="🔄 Возврат", callback_data=f"settle_{created_id}_refund"),
+                InlineKeyboardButton(text="✅ Выиграл", callback_data=f"settle_{prediction_id}_win"),
+                InlineKeyboardButton(text="❌ Проиграл", callback_data=f"settle_{prediction_id}_loss"),
+                InlineKeyboardButton(text="🔄 Возврат", callback_data=f"settle_{prediction_id}_refund"),
             ],
             [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")],
         ]
     )
-    prediction_text = format_prediction_message(
-        match=match_context,
-        prediction=str(ai_result["prediction"]),
-        reasoning=str(ai_result["reasoning"]),
-        confidence=int(ai_result["confidence"]),
-        stake=float(stake),
-        bankroll=bankroll,
-        news_sentiment_home=sentiment_home,
-        news_sentiment_away=sentiment_away,
-        prediction_id=created_id,
-    )
-
-    await message.answer(
-        f"{prediction_text}\n\nУкажите результат, когда матч завершится:",
+    await call.message.answer(
+        f"{prediction_payload['text']}\n\nУкажите результат, когда матч завершится:",
         reply_markup=close_kb,
         parse_mode="HTML",
     )
+    await call.answer()
 
 
 # ── Callback: Закрытие ставки ───────────────────────────────────────────────

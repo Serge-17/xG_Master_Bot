@@ -19,6 +19,7 @@ class Settings:
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./xg_master_bot.db")
     sqlalchemy_echo: bool = os.getenv("SQLALCHEMY_ECHO", "0") == "1"
     default_bet_percent: float = float(os.getenv("DEFAULT_BET_PERCENT", "0.03"))
+    reserve_bankroll_fraction: float = float(os.getenv("RESERVE_BANKROLL_FRACTION", "0.25"))
     digest_matches_limit: int = int(os.getenv("DIGEST_MATCHES_LIMIT", "12"))
     digest_post_minute: int = int(os.getenv("DIGEST_POST_MINUTE", "5"))
 

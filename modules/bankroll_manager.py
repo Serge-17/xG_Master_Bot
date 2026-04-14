@@ -36,15 +36,16 @@ def recommended_stake(
     kelly_cap: float | None = None,
 ) -> float:
     bankroll = max(0.0, bankroll)
+    reserve_fraction = max(0.0, min(settings.reserve_bankroll_fraction, 0.95))
+    available_to_bet = bankroll * (1.0 - reserve_fraction)
     if strategy == "kelly" and odds is not None:
         probability = confidence_to_probability(confidence)
         fraction = kelly_fraction(probability, odds)
         cap = kelly_cap if kelly_cap is not None else settings.default_bet_percent * 8
         fraction = min(fraction, cap)
-        return round(bankroll * fraction, 2)
+        return round(min(bankroll * fraction, available_to_bet), 2)
 
-    percent = flat_percent if flat_percent is not None else settings.default_bet_percent
-    return round(bankroll * percent, 2)
+    return round(available_to_bet, 2)
 
 
 def apply_result(bankroll: float, outcome: str, stake: float, odds: float | None = None) -> float:
