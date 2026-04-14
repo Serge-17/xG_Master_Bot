@@ -10,3 +10,5 @@ fastapi>=0.112.0
 uvicorn>=0.30.5
 alembic>=1.13.2
 psycopg[binary]>=3.2.6
+feedparser>=6.0.11
+huggingface_hub>=0.23.0

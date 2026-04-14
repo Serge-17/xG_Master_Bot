@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import os
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -10,6 +9,7 @@ from aiogram.types import Update
 from .config import settings
 from .database import init_db
 from .main import dp
+from .modules.scheduler import register_reporting_jobs, start_scheduler, stop_scheduler
 
 
 app = FastAPI(title="xG-Master Bot API")
@@ -21,6 +21,9 @@ async def on_startup() -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
     init_db()
     app.state.bot = Bot(token=settings.telegram_bot_token)
+    start_scheduler()
+    register_reporting_jobs(app.state.bot)
+
     webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
     secret_token = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip() or None
     if webhook_url:
@@ -29,6 +32,7 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    stop_scheduler()
     bot = getattr(app.state, "bot", None)
     if bot is not None:
         await bot.session.close()
@@ -57,5 +61,4 @@ async def telegram_webhook(
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("xG_Master_Bot.webapp:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=False)
