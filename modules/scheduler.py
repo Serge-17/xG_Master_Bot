@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from modules.database import SessionLocal
-from modules.database.crud import list_telegram_ids
-from modules.retrospective import build_user_retrospective
+from database import SessionLocal
+from database.crud import list_telegram_ids
+from retrospective import build_user_retrospective
+
 
 
 scheduler = AsyncIOScheduler()
