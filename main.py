@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
@@ -35,6 +36,11 @@ from database.crud import (
 from modules.ai_analyst import generate_prediction, generate_russian_post, analyze_news_sentiment
 from modules.bankroll_manager import recommended_stake
 from modules.data_sources import build_match_context
+from modules.daily_digest import (
+    apply_bankroll_to_recommendations,
+    build_daily_recommendations,
+    format_user_digest,
+)
 from modules.news_parser import build_news_summary
 from modules.ocr_processor import interpret_result, process_coupon_image
 from modules.retrospective import build_user_retrospective
@@ -80,10 +86,11 @@ def main_menu_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu_settings"),
             ],
             [
-                InlineKeyboardButton(text="🔍 Найти матч", callback_data="menu_predict"),
+                InlineKeyboardButton(text="🗓 Матчи дня", callback_data="menu_today"),
                 InlineKeyboardButton(text="📋 Прогнозы", callback_data="menu_predictions"),
             ],
             [
+                InlineKeyboardButton(text="🔍 Найти матч", callback_data="menu_predict"),
                 InlineKeyboardButton(text="📝 Ретро-отчёт", callback_data="menu_retro"),
             ],
         ]
@@ -117,6 +124,24 @@ def get_session():
     return SessionLocal()
 
 
+def build_personal_today_digest(telegram_id: int, limit: int | None = None) -> str:
+    target_date = datetime.now().date()
+    with get_session() as session:
+        summary = get_user_summary(session, telegram_id)
+
+    recommendations = apply_bankroll_to_recommendations(
+        build_daily_recommendations(
+            target_date=target_date,
+            limit=limit or settings.digest_matches_limit,
+        ),
+        bankroll=float(summary["bankroll"]),
+        strategy=str(summary["bankroll_strategy"]),
+        flat_percent=float(summary["flat_percent"]) / 100.0,
+        kelly_cap=float(summary["kelly_fraction_limit"]) / 100.0,
+    )
+    return format_user_digest(recommendations, summary, target_date=target_date)
+
+
 # ── /start ─────────────────────────────────────────────────────────────────
 
 @dp.message(Command("start"))
@@ -138,6 +163,7 @@ async def help_handler(message: Message) -> None:
         "/set_bankroll &lt;сумма&gt; — установить банк\n"
         "/set_strategy &lt;flat|kelly&gt; [%] [kelly_cap%] — стратегия\n"
         "/my_bankroll — банк и статистика\n"
+        "/today — подборка матчей на сегодня\n"
         "/predict &lt;лига&gt; &lt;команда1&gt; vs &lt;команда2&gt; — прогноз\n"
         "/my_predictions — последние прогнозы\n"
         "/close_prediction &lt;id&gt; &lt;win|loss|refund&gt; &lt;сумма&gt; — закрыть\n"
@@ -228,7 +254,7 @@ async def cb_predictions(call: CallbackQuery) -> None:
         predictions = get_recent_predictions(session, call.from_user.id, limit=5)
 
     if not predictions:
-        text = "📋 <b>Прогнозы</b>\n\nПрогнозов пока нет. Используйте 🔍 Найти матч."
+        text = "📋 <b>Прогнозы</b>\n\nПрогнозов пока нет. Откройте 🗓 Матчи дня или используйте 🔍 Найти матч."
     else:
         lines = ["📋 <b>Последние прогнозы:</b>\n"]
         for p in predictions:
@@ -241,6 +267,12 @@ async def cb_predictions(call: CallbackQuery) -> None:
         text = "\n".join(lines)
 
     await call.message.edit_text(text, reply_markup=back_kb(), parse_mode="HTML")
+    await call.answer()
+
+
+@dp.callback_query(F.data == "menu_today")
+async def cb_today(call: CallbackQuery) -> None:
+    await call.message.edit_text(build_personal_today_digest(call.from_user.id), reply_markup=back_kb())
     await call.answer()
 
 
@@ -580,6 +612,11 @@ async def my_bankroll_handler(message: Message) -> None:
         parse_mode="HTML",
         reply_markup=main_menu_kb(),
     )
+
+
+@dp.message(Command("today"))
+async def today_handler(message: Message) -> None:
+    await message.answer(build_personal_today_digest(message.from_user.id), reply_markup=main_menu_kb())
 
 
 @dp.message(Command("my_predictions"))

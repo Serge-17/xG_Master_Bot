@@ -4,6 +4,7 @@ import csv
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime, time
 from functools import lru_cache
 from typing import Any
 
@@ -39,6 +40,18 @@ class TeamContext:
     home_form: str = ""
     away_form: str = ""
     injuries: str = ""
+    odds: dict[str, float] | None = None
+    source_notes: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class FixtureRow:
+    league: str
+    home_team: str
+    away_team: str
+    match_date: date
+    kickoff: str = ""
     odds: dict[str, float] | None = None
     source_notes: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -218,6 +231,43 @@ def _extract_odds_from_row(row: dict[str, str]) -> dict[str, float] | None:
     return odds
 
 
+def _parse_fixture_date(raw_value: str | None) -> date | None:
+    value = (raw_value or "").strip()
+    if not value:
+        return None
+
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_fixture_time(raw_value: str | None) -> time | None:
+    value = (raw_value or "").strip()
+    if not value:
+        return None
+
+    for fmt in ("%H:%M", "%H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt).time()
+        except ValueError:
+            continue
+    return None
+
+
+def _fixture_league_name(row: dict[str, str]) -> str:
+    return (
+        row.get("League")
+        or row.get("Competition")
+        or row.get("Country")
+        or row.get("Div")
+        or row.get("Division")
+        or "Unknown"
+    ).strip()
+
+
 @lru_cache(maxsize=1)
 def _football_data_fixtures() -> list[dict[str, str]]:
     return _load_csv(settings.football_data_fixtures_url)
@@ -246,6 +296,46 @@ def _find_fixtures_odds(league: str, home_team: str, away_team: str) -> tuple[di
                 return odds, "football-data.co.uk fixtures.csv"
 
     return None, "football-data.co.uk fallback unavailable"
+
+
+def list_fixtures_for_date(target_date: date, limit: int | None = None) -> list[FixtureRow]:
+    fixtures: list[FixtureRow] = []
+    seen: set[tuple[str, str, str, date]] = set()
+
+    for row in _football_data_fixtures():
+        match_date = _parse_fixture_date(row.get("Date"))
+        if match_date != target_date:
+            continue
+
+        home_team = (row.get("Home") or row.get("HomeTeam") or row.get("Home Team") or "").strip()
+        away_team = (row.get("Away") or row.get("AwayTeam") or row.get("Away Team") or "").strip()
+        league = _fixture_league_name(row)
+        if not home_team or not away_team:
+            continue
+
+        unique_key = (_normalize(league), _normalize(home_team), _normalize(away_team), match_date)
+        if unique_key in seen:
+            continue
+        seen.add(unique_key)
+
+        kickoff_time = _parse_fixture_time(row.get("Time"))
+        fixtures.append(
+            FixtureRow(
+                league=league,
+                home_team=home_team,
+                away_team=away_team,
+                match_date=match_date,
+                kickoff=kickoff_time.strftime("%H:%M") if kickoff_time else "",
+                odds=_extract_odds_from_row(row) or DEFAULT_ODDS.copy(),
+                source_notes="football-data.co.uk fixtures.csv",
+                metadata={"provider": "football-data.co.uk", "raw_row": row},
+            )
+        )
+
+    fixtures.sort(key=lambda item: (item.kickoff or "99:99", item.league, item.home_team))
+    if limit is not None:
+        return fixtures[:limit]
+    return fixtures
 
 
 def fetch_open_xg_context(league: str, home_team: str, away_team: str) -> TeamContext:
