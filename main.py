@@ -473,15 +473,16 @@ async def process_teams(message: Message, state: FSMContext) -> None:
             amount=float(stake),
             prediction_id=created.id,
         )
+        created_id = int(created.id)
 
     await wait_msg.delete()
 
     close_kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Выиграл", callback_data=f"settle_{created.id}_win"),
-                InlineKeyboardButton(text="❌ Проиграл", callback_data=f"settle_{created.id}_loss"),
-                InlineKeyboardButton(text="🔄 Возврат", callback_data=f"settle_{created.id}_refund"),
+                InlineKeyboardButton(text="✅ Выиграл", callback_data=f"settle_{created_id}_win"),
+                InlineKeyboardButton(text="❌ Проиграл", callback_data=f"settle_{created_id}_loss"),
+                InlineKeyboardButton(text="🔄 Возврат", callback_data=f"settle_{created_id}_refund"),
             ],
             [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")],
         ]
@@ -495,7 +496,7 @@ async def process_teams(message: Message, state: FSMContext) -> None:
         bankroll=bankroll,
         news_sentiment_home=sentiment_home,
         news_sentiment_away=sentiment_away,
-        prediction_id=created.id,
+        prediction_id=created_id,
     )
 
     await message.answer(
@@ -679,6 +680,7 @@ async def predict_handler(message: Message, command: CommandObject) -> None:
         )
         record_transaction(session=session, telegram_id=message.from_user.id,
                            transaction_type="Bet", amount=float(stake), prediction_id=created.id)
+        created_id = int(created.id)
 
     await message.answer(
         format_prediction_message(
@@ -688,7 +690,7 @@ async def predict_handler(message: Message, command: CommandObject) -> None:
             confidence=int(ai_result["confidence"]),
             stake=float(stake),
             bankroll=bankroll,
-            prediction_id=created.id,
+            prediction_id=created_id,
         ),
         parse_mode="HTML",
         reply_markup=main_menu_kb(),

@@ -12,7 +12,13 @@ engine = create_engine(
     echo=settings.sqlalchemy_echo,
 )
 
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+    expire_on_commit=False,
+    future=True,
+)
 Base = declarative_base()
 
 

@@ -21,6 +21,14 @@ JSON_SCHEMA_HINT = {
 }
 
 
+def _resolved_hf_model() -> str:
+    raw_model = (settings.hf_model or "mistralai/Mistral-7B-Instruct-v0.3").strip()
+    model = raw_model.split(":", 1)[0].strip()
+    if model != raw_model:
+        logger.warning("HF model alias '%s' normalized to '%s'", raw_model, model)
+    return model
+
+
 def _team_context_to_text(match: TeamContext) -> str:
     return (
         f"Лига: {match.league}\n"
@@ -84,7 +92,7 @@ def _call_hf_inference_client(prompt: str, max_tokens: int = 512) -> str:
     try:
         from huggingface_hub import InferenceClient  # type: ignore
 
-        model = settings.hf_model or "mistralai/Mistral-7B-Instruct-v0.3"
+        model = _resolved_hf_model()
         token = settings.hf_api_token or None
         client = InferenceClient(model=model, token=token)
         response = client.text_generation(
@@ -138,7 +146,7 @@ def _call_huggingface(prompt: str) -> dict[str, Any]:
 
     # Fallback: raw HTTP inference endpoint
     response = requests.post(
-        f"{settings.hf_inference_url}/{settings.hf_model}",
+        f"{settings.hf_inference_url}/{_resolved_hf_model()}",
         headers={
             "Authorization": f"Bearer {settings.hf_api_token}",
             "Content-Type": "application/json",
