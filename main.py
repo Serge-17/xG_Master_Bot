@@ -33,7 +33,11 @@ from database.crud import (
     update_prediction_result,
     update_coupon_settlement,
 )
-from modules.ai_analyst import generate_prediction, generate_russian_post, analyze_news_sentiment
+from modules.ai_analyst import (
+    analyze_news_sentiment,
+    format_prediction_message,
+    generate_prediction,
+)
 from modules.bankroll_manager import recommended_stake
 from modules.data_sources import build_match_context
 from modules.daily_digest import (
@@ -41,6 +45,7 @@ from modules.daily_digest import (
     build_daily_recommendations,
     format_user_digest,
 )
+from modules.localization import parse_matchup, translate_market, translate_outcome
 from modules.news_parser import build_news_summary
 from modules.ocr_processor import interpret_result, process_coupon_image
 from modules.retrospective import build_user_retrospective
@@ -224,7 +229,7 @@ async def cb_stats(call: CallbackQuery) -> None:
             icon = {"Win": "✅", "Loss": "❌", "Refund": "🔄"}.get(p.outcome, "⏳")
             lines.append(
                 f"{icon} #{p.id} {p.match_info}\n"
-                f"   {p.ai_prediction} | {format_money(p.placed_amount)} руб. | {p.outcome}"
+                f"   {translate_market(p.ai_prediction)} | {format_money(p.placed_amount)} руб. | {translate_outcome(p.outcome)}"
             )
         text = "\n".join(lines)
 
@@ -261,8 +266,8 @@ async def cb_predictions(call: CallbackQuery) -> None:
             icon = {"Win": "✅", "Loss": "❌", "Refund": "🔄", "Pending": "⏳"}.get(p.outcome, "⏳")
             lines.append(
                 f"{icon} <b>#{p.id}</b> {p.match_info}\n"
-                f"   🎯 {p.ai_prediction} | ⭐ {p.confidence}/5 | "
-                f"💰 {format_money(p.recommended_amount)} руб. | {p.outcome}"
+                f"   🎯 {translate_market(p.ai_prediction)} | ⭐ {p.confidence}/5 | "
+                f"💰 {format_money(p.recommended_amount)} руб. | {translate_outcome(p.outcome)}"
             )
         text = "\n".join(lines)
 
@@ -383,7 +388,7 @@ async def cb_predict_start(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.edit_text(
         "🔍 <b>Поиск матча</b>\n\n"
         "Введите название лиги:\n"
-        "Например: <code>Premier League</code>, <code>La Liga</code>, <code>Serie A</code>",
+        "Например: <code>Премьер-лига</code>, <code>Ла Лига</code>, <code>Серия А</code>, <code>Лига чемпионов</code>",
         reply_markup=back_kb(),
         parse_mode="HTML",
     )
@@ -395,8 +400,9 @@ async def process_league(message: Message, state: FSMContext) -> None:
     await state.update_data(league=message.text or "")
     await state.set_state(MatchScan.waiting_teams)
     await message.answer(
-        "⚽ Введите команды в формате:\n<code>Команда1 vs Команда2</code>\n\n"
-        "Например: <code>Arsenal vs Chelsea</code>",
+        "⚽ Введите команды в формате:\n<code>Команда1 - Команда2</code>\n\n"
+        "Можно писать и так: <code>Арсенал vs Челси</code>\n"
+        "Например: <code>Барселона - Атлетико</code>",
         reply_markup=back_kb(),
         parse_mode="HTML",
     )
@@ -405,13 +411,17 @@ async def process_league(message: Message, state: FSMContext) -> None:
 @dp.message(MatchScan.waiting_teams)
 async def process_teams(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
-    if " vs " not in raw:
-        await message.answer("❌ Формат: <code>Команда1 vs Команда2</code>", parse_mode="HTML")
+    parsed_match = parse_matchup(raw)
+    if parsed_match is None:
+        await message.answer(
+            "❌ Формат не распознан.\nИспользуйте, например: <code>Арсенал - Бавария</code>",
+            parse_mode="HTML",
+        )
         return
 
-    home_team, away_team = raw.split(" vs ", 1)
+    home_team, away_team = parsed_match
     data = await state.get_data()
-    league = data.get("league", "Unknown")
+    league = data.get("league", "Неизвестная лига")
     await state.clear()
 
     wait_msg = await message.answer("⏳ Анализирую матч, собираю данные...")
@@ -450,7 +460,7 @@ async def process_teams(message: Message, state: FSMContext) -> None:
         created = create_prediction(
             session=session,
             telegram_id=message.from_user.id,
-            match_info=f"{league} {home_team.strip()} vs {away_team.strip()}",
+            match_info=f"{league} {home_team.strip()} - {away_team.strip()}",
             ai_prediction=str(ai_result["prediction"]),
             ai_reasoning=str(ai_result["reasoning"]),
             confidence=int(ai_result["confidence"]),
@@ -464,26 +474,7 @@ async def process_teams(message: Message, state: FSMContext) -> None:
             prediction_id=created.id,
         )
 
-    # Генерация поста на русском
-    russian_post = generate_russian_post(
-        match=match_context,
-        prediction=str(ai_result["prediction"]),
-        reasoning=str(ai_result["reasoning"]),
-        confidence=int(ai_result["confidence"]),
-        stake=float(stake),
-        bankroll=bankroll,
-        news_sentiment_home=sentiment_home,
-        news_sentiment_away=sentiment_away,
-    )
-
     await wait_msg.delete()
-
-    # Отдельно новости
-    news_block = (
-        f"📰 <b>Новости:</b>\n"
-        f"🏠 {home_team}: {sentiment_home}\n"
-        f"✈️ {away_team}: {sentiment_away}"
-    )
 
     close_kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -495,10 +486,20 @@ async def process_teams(message: Message, state: FSMContext) -> None:
             [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")],
         ]
     )
+    prediction_text = format_prediction_message(
+        match=match_context,
+        prediction=str(ai_result["prediction"]),
+        reasoning=str(ai_result["reasoning"]),
+        confidence=int(ai_result["confidence"]),
+        stake=float(stake),
+        bankroll=bankroll,
+        news_sentiment_home=sentiment_home,
+        news_sentiment_away=sentiment_away,
+        prediction_id=created.id,
+    )
 
     await message.answer(
-        f"{russian_post}\n\n{news_block}\n\n"
-        f"🆔 Прогноз <b>#{created.id}</b> сохранён. Укажите результат когда матч завершится:",
+        f"{prediction_text}\n\nУкажите результат, когда матч завершится:",
         reply_markup=close_kb,
         parse_mode="HTML",
     )
@@ -629,22 +630,30 @@ async def my_predictions_handler(message: Message) -> None:
     lines = ["📋 <b>Последние прогнозы:</b>\n"]
     for p in predictions:
         icon = {"Win": "✅", "Loss": "❌", "Refund": "🔄", "Pending": "⏳"}.get(p.outcome, "⏳")
-        lines.append(f"{icon} #{p.id} {p.match_info}: {p.ai_prediction} ({p.confidence}/5, {format_money(p.recommended_amount)} руб., {p.outcome})")
+        lines.append(
+            f"{icon} #{p.id} {p.match_info}: {translate_market(p.ai_prediction)} "
+            f"({p.confidence}/5, {format_money(p.recommended_amount)} руб., {translate_outcome(p.outcome)})"
+        )
     await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=main_menu_kb())
 
 
 @dp.message(Command("predict"))
 async def predict_handler(message: Message, command: CommandObject) -> None:
-    if not command.args or " vs " not in command.args:
-        await message.answer("Использование: /predict <лига> <команда1> vs <команда2>")
+    if not command.args:
+        await message.answer("Использование: /predict <лига> ; <команда1> - <команда2>")
         return
-    raw = command.args.strip()
-    league_and_home, away_team = raw.rsplit(" vs ", 1)
-    parts = league_and_home.split(maxsplit=1)
-    if len(parts) < 2:
-        await message.answer("Укажите лигу и обе команды.")
+
+    if ";" not in command.args:
+        await message.answer("Например: <code>/predict Ла Лига ; Барселона - Атлетико</code>", parse_mode="HTML")
         return
-    league, home_team = parts[0], parts[1]
+
+    league_raw, teams_raw = [part.strip() for part in command.args.split(";", 1)]
+    parsed_match = parse_matchup(teams_raw)
+    if parsed_match is None:
+        await message.answer("Команды не распознаны. Пример: <code>Барселона - Атлетико</code>", parse_mode="HTML")
+        return
+    league = league_raw
+    home_team, away_team = parsed_match
 
     with get_session() as session:
         summary = get_user_summary(session, message.from_user.id)
@@ -662,7 +671,7 @@ async def predict_handler(message: Message, command: CommandObject) -> None:
     with get_session() as session:
         created = create_prediction(
             session=session, telegram_id=message.from_user.id,
-            match_info=f"{league} {home_team} vs {away_team}",
+            match_info=f"{league} {home_team} - {away_team}",
             ai_prediction=str(ai_result["prediction"]),
             ai_reasoning=str(ai_result["reasoning"]),
             confidence=int(ai_result["confidence"]),
@@ -672,11 +681,15 @@ async def predict_handler(message: Message, command: CommandObject) -> None:
                            transaction_type="Bet", amount=float(stake), prediction_id=created.id)
 
     await message.answer(
-        f"🎯 <b>Прогноз:</b> {ai_result['prediction']}\n"
-        f"⭐ Уверенность: {ai_result['confidence']}/5\n"
-        f"💰 Ставка: {format_money(float(stake))} руб.\n"
-        f"💡 {ai_result['reasoning']}\n"
-        f"🆔 #{created.id}",
+        format_prediction_message(
+            match=match_context,
+            prediction=str(ai_result["prediction"]),
+            reasoning=str(ai_result["reasoning"]),
+            confidence=int(ai_result["confidence"]),
+            stake=float(stake),
+            bankroll=bankroll,
+            prediction_id=created.id,
+        ),
         parse_mode="HTML",
         reply_markup=main_menu_kb(),
     )
@@ -706,7 +719,7 @@ async def close_prediction_handler(message: Message, command: CommandObject) -> 
         tx = record_settlement(session=session, telegram_id=message.from_user.id,
                                outcome=outcome, stake=amount, prediction_id=prediction.id)
     await message.answer(
-        f"✅ Прогноз #{prediction_id} закрыт как {outcome.title()} на {format_money(amount)} руб.\n"
+        f"✅ Прогноз #{prediction_id} закрыт как {translate_outcome(outcome.title())} на {format_money(amount)} руб.\n"
         f"💰 Новый банк: {format_money(tx.new_bankroll)} руб.",
         reply_markup=main_menu_kb(),
     )

@@ -1,16 +1,17 @@
 WELCOME_MESSAGE = (
-    "xG-Master Bot ready.\n"
-    "Use /set_bankroll, /my_bankroll, /predict, and /upload_coupon to get started."
+    "xG-Master Bot готов к работе.\n"
+    "Используйте /set_bankroll, /my_bankroll, /today, /predict и /upload_coupon."
 )
 
 HELP_MESSAGE = (
-    "/start - welcome\n"
-    "/set_bankroll <amount> - set bankroll\n"
-    "/set_strategy <flat|kelly> [flat_percent] [kelly_cap] - set betting strategy\n"
-    "/my_bankroll - show bankroll and stats\n"
-    "/predict <league> <team1> vs <team2> - create a prediction\n"
-    "/my_predictions - show recent predictions\n"
-    "/close_prediction <id> <win|loss|refund> <amount> - settle a prediction\n"
-    "/retro_report - generate a retrospective report\n"
-    "/upload_coupon - attach a result screenshot"
+    "/start - главное меню\n"
+    "/set_bankroll <сумма> - установить банк\n"
+    "/set_strategy <flat|kelly> [процент] [kelly_cap] - стратегия ставок\n"
+    "/my_bankroll - показать банк и статистику\n"
+    "/today - матчи дня и рекомендации\n"
+    "/predict <лига> ; <команда1> - <команда2> - ручной прогноз\n"
+    "/my_predictions - последние прогнозы\n"
+    "/close_prediction <id> <win|loss|refund> <сумма> - закрыть прогноз\n"
+    "/retro_report - ретро-отчёт\n"
+    "/upload_coupon - загрузить скриншот ставки"
 )

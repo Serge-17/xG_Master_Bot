@@ -8,13 +8,14 @@ from typing import Any
 import requests
 from config import settings
 from modules.bankroll_manager import recommended_stake
+from modules.localization import translate_market, translate_sentiment
 from modules.data_sources import TeamContext
 
 logger = logging.getLogger(__name__)
 
 JSON_SCHEMA_HINT = {
-    "prediction": "P1|X|P2|TБ2.5|BTTS|Other",
-    "reasoning": "short explanation",
+    "prediction": "П1|X|П2|ТБ2.5|ОЗ|Другое",
+    "reasoning": "краткое объяснение",
     "confidence": 1,
     "recommended_stake": 0.0,
 }
@@ -22,30 +23,30 @@ JSON_SCHEMA_HINT = {
 
 def _team_context_to_text(match: TeamContext) -> str:
     return (
-        f"League: {match.league}\n"
-        f"Match: {match.home_team} vs {match.away_team}\n"
-        f"Odds: {match.odds}\n"
-        f"Home xG: {match.home_xg}\n"
-        f"Away xG: {match.away_xg}\n"
-        f"Home xGA: {match.home_xga}\n"
-        f"Away xGA: {match.away_xga}\n"
-        f"Home form: {match.home_form}\n"
-        f"Away form: {match.away_form}\n"
-        f"Injuries: {match.injuries}\n"
-        f"Source notes: {match.source_notes}"
+        f"Лига: {match.league}\n"
+        f"Матч: {match.home_team} vs {match.away_team}\n"
+        f"Коэффициенты: {match.odds}\n"
+        f"xG хозяев: {match.home_xg}\n"
+        f"xG гостей: {match.away_xg}\n"
+        f"xGA хозяев: {match.home_xga}\n"
+        f"xGA гостей: {match.away_xga}\n"
+        f"Форма хозяев: {match.home_form}\n"
+        f"Форма гостей: {match.away_form}\n"
+        f"Потери состава: {match.injuries}\n"
+        f"Источник: {match.source_notes}"
     )
 
 
 def build_prediction_prompt(match: TeamContext, bankroll: float, confidence: float = 0.6) -> str:
     stake = recommended_stake(bankroll, confidence, strategy="flat")
     return (
-        "You are a football betting analyst. Return ONLY valid JSON, no markdown. "
-        f"Use this schema hint: {json.dumps(JSON_SCHEMA_HINT, ensure_ascii=False)}.\n"
+        "Ты футбольный аналитик по ставкам. Верни ТОЛЬКО JSON без markdown. "
+        f"Используй схему: {json.dumps(JSON_SCHEMA_HINT, ensure_ascii=False)}.\n"
         f"{_team_context_to_text(match)}\n"
-        f"Metadata: {json.dumps(match.metadata, ensure_ascii=False)}\n"
-        f"Current bankroll: {bankroll}\n"
-        f"Suggested stake: {stake}\n"
-        "Prefer safe, conservative recommendations and explicitly mention uncertainty."
+        f"Метаданные: {json.dumps(match.metadata, ensure_ascii=False)}\n"
+        f"Текущий банк: {bankroll}\n"
+        f"Рекомендуемая сумма ставки: {stake}\n"
+        "Предпочитай консервативные рынки и обязательно указывай неопределённость."
     )
 
 
@@ -61,7 +62,7 @@ def _extract_json_payload(text: str) -> dict[str, Any]:
 
 
 def _normalize_prediction_payload(payload: dict[str, Any], bankroll: float) -> dict[str, Any]:
-    prediction = str(payload.get("prediction") or payload.get("pick") or "BTTS")
+    prediction = str(payload.get("prediction") or payload.get("pick") or "ОЗ")
     reasoning = str(payload.get("reasoning") or payload.get("analysis") or "")
     confidence = int(payload.get("confidence") or 3)
     recommended_stake_value = payload.get("recommended_stake")
@@ -171,9 +172,9 @@ def analyze_news_sentiment(news_summary: str, team_name: str) -> str:
     Uses HF InferenceClient if available, else returns Neutral.
     """
     prompt = (
-        f"You are a football news analyst. Evaluate the following news for team '{team_name}'.\n"
-        f"News:\n{news_summary}\n\n"
-        "Reply with ONLY one word: Positive, Negative, or Neutral."
+        f"Ты аналитик футбольных новостей. Оцени фон новостей вокруг команды '{team_name}'.\n"
+        f"Новости:\n{news_summary}\n\n"
+        "Ответь только одним словом: Positive, Negative или Neutral."
     )
     try:
         if settings.ai_provider in {"hf", "huggingface"} and settings.hf_api_token:
@@ -223,8 +224,8 @@ def generate_russian_post(
         f"Форма хозяев: {match.home_form}, Форма гостей: {match.away_form}\n"
         f"Травмы: {match.injuries}\n"
         f"Коэффициенты: П1={odds_home}, X={odds_draw}, П2={odds_away}\n"
-        f"Новостной фон хозяев: {news_sentiment_home}, гостей: {news_sentiment_away}\n"
-        f"Прогноз AI: {prediction} (уверенность {confidence}/5)\n"
+        f"Новостной фон хозяев: {translate_sentiment(news_sentiment_home)}, гостей: {translate_sentiment(news_sentiment_away)}\n"
+        f"Прогноз AI: {translate_market(prediction)} (уверенность {confidence}/5)\n"
         f"Обоснование: {reasoning}\n"
         f"Рекомендуемая ставка: {stake:.2f} руб. (от банка {bankroll:.2f} руб.)\n\n"
         "Напиши красивый пост с эмодзи, заголовком, анализом и рекомендацией. "
@@ -257,18 +258,55 @@ def generate_russian_post(
         f"🏆 {match.league}\n\n"
         f"📊 xG: {match.home_xg} vs {match.away_xg}\n"
         f"📈 Форма: {match.home_form} / {match.away_form}\n\n"
-        f"🎯 Прогноз: {prediction}\n"
+        f"🎯 Прогноз: {translate_market(prediction)}\n"
         f"💡 {reasoning[:100]}\n\n"
         f"💰 Ставка: {stake:.2f} руб. | Кф: {odds_home}\n"
         f"⭐️ Уверенность: {'★' * confidence}{'☆' * (5 - confidence)}"
     )
 
 
+def format_prediction_message(
+    match: TeamContext,
+    prediction: str,
+    reasoning: str,
+    confidence: int,
+    stake: float,
+    bankroll: float,
+    news_sentiment_home: str = "Neutral",
+    news_sentiment_away: str = "Neutral",
+    prediction_id: int | None = None,
+) -> str:
+    odds = match.odds or {}
+    odds_home = odds.get("home", "?")
+    odds_draw = odds.get("draw", "?")
+    odds_away = odds.get("away", "?")
+    odds_over = odds.get("over_2_5", "?")
+    odds_btts = odds.get("btts_yes", "?")
+    lines = [
+        f"⚽️ <b>{match.home_team} vs {match.away_team}</b>",
+        f"🏆 {match.league}",
+        "",
+        f"📊 xG: {match.home_xg or 'нет данных'} vs {match.away_xg or 'нет данных'}",
+        f"🛡 xGA: {match.home_xga or 'нет данных'} vs {match.away_xga or 'нет данных'}",
+        f"📈 Форма: {match.home_form or 'N/A'} / {match.away_form or 'N/A'}",
+        f"📰 Новости: {translate_sentiment(news_sentiment_home)} / {translate_sentiment(news_sentiment_away)}",
+        "",
+        f"💸 Линия: П1 {odds_home} | X {odds_draw} | П2 {odds_away} | ТБ2.5 {odds_over} | ОЗ {odds_btts}",
+        f"🎯 Наша ставка: <b>{translate_market(prediction)}</b>",
+        f"⭐ Уверенность: {confidence}/5",
+        f"💰 Рекомендуемая сумма: <b>{stake:.2f} руб.</b> от банка {bankroll:.2f} руб.",
+        f"💡 Аргумент: {reasoning}",
+    ]
+    if prediction_id is not None:
+        lines.extend(["", f"🆔 Прогноз #{prediction_id} сохранён."])
+    return "\n".join(lines)
+
+
 def mock_predict(match: TeamContext, bankroll: float) -> dict[str, object]:
     prompt = build_prediction_prompt(match, bankroll)
     return {
-        "prediction": "BTTS",
-        "reasoning": "Mock response generated by the local scaffold. Replace with a real LLM or inference endpoint.",
+        "prediction": "ОЗ",
+        "reasoning": "Использован локальный фолбэк: ставку выбираем по доступным xG, форме и линии без внешней модели.",
         "confidence": 3,
         "recommended_stake": recommended_stake(bankroll, 0.6, strategy="flat"),
         "prompt": prompt,
@@ -293,8 +331,8 @@ def generate_prediction(match: TeamContext, bankroll: float) -> dict[str, object
             return normalized
     except Exception as exc:
         return {
-            "prediction": "BTTS",
-            "reasoning": f"Provider error, fallback used: {exc}",
+            "prediction": "ОЗ",
+            "reasoning": f"Внешняя модель недоступна, поэтому использован безопасный локальный фолбэк: {exc}",
             "confidence": 2,
             "recommended_stake": recommended_stake(bankroll, 0.4, strategy="flat"),
             "prompt": prompt,
@@ -308,6 +346,6 @@ def build_retro_report(predictions: list[dict[str, object]]) -> str:
     payload = {
         "total_predictions": len(predictions),
         "predictions": predictions,
-        "summary": "Mock retrospective report. Replace with LLM analysis for real audits.",
+        "summary": "Локальный ретро-отчёт без внешней LLM-аналитики.",
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)

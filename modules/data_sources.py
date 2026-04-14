@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from config import settings
+from modules.localization import resolve_league_name, resolve_team_name
 
 
 STATSBOMB_XG_EVENT_TYPES = {"Shot"}
@@ -414,30 +415,57 @@ def fetch_open_xg_context(league: str, home_team: str, away_team: str) -> TeamCo
 
 
 def build_match_context(league: str, home_team: str, away_team: str) -> TeamContext:
+    canonical_league, display_league = resolve_league_name(league)
+    canonical_home, display_home = resolve_team_name(home_team)
+    canonical_away, display_away = resolve_team_name(away_team)
+
     if settings.data_provider in {"open", "statsbomb", "football-data"}:
         try:
-            return fetch_open_xg_context(league, home_team, away_team)
+            context = fetch_open_xg_context(canonical_league, canonical_home, canonical_away)
+            context.league = display_league
+            context.home_team = display_home
+            context.away_team = display_away
+            context.metadata.update(
+                {
+                    "canonical_league": canonical_league,
+                    "canonical_home_team": canonical_home,
+                    "canonical_away_team": canonical_away,
+                }
+            )
+            return context
         except Exception as exc:
             return TeamContext(
-                league=league,
-                home_team=home_team,
-                away_team=away_team,
+                league=display_league,
+                home_team=display_home,
+                away_team=display_away,
                 home_form="N/A",
                 away_form="N/A",
                 injuries="Manual or external feed required",
                 odds=DEFAULT_ODDS,
                 source_notes=f"Open-data provider fallback used: {exc}",
-                metadata={"provider": "fallback", "available": False},
+                metadata={
+                    "provider": "fallback",
+                    "available": False,
+                    "canonical_league": canonical_league,
+                    "canonical_home_team": canonical_home,
+                    "canonical_away_team": canonical_away,
+                },
             )
 
     return TeamContext(
-        league=league,
-        home_team=home_team,
-        away_team=away_team,
+        league=display_league,
+        home_team=display_home,
+        away_team=display_away,
         home_form="N/A",
         away_form="N/A",
         injuries="Manual or external feed required",
         odds=DEFAULT_ODDS,
         source_notes="Mock data provider selected",
-        metadata={"provider": "mock", "available": False},
+        metadata={
+            "provider": "mock",
+            "available": False,
+            "canonical_league": canonical_league,
+            "canonical_home_team": canonical_home,
+            "canonical_away_team": canonical_away,
+        },
     )

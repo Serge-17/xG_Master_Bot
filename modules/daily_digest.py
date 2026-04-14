@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from modules.bankroll_manager import recommended_stake
 from modules.data_sources import TeamContext, build_match_context, list_fixtures_for_date
+from modules.localization import translate_market
 from utils.helpers import format_money
 
 
@@ -79,6 +80,11 @@ def build_daily_recommendations(
 ) -> list[MatchRecommendation]:
     selected_date = target_date or datetime.now().date()
     fixtures = list_fixtures_for_date(selected_date, limit=max(limit * 3, 30))
+    if not fixtures:
+        for day_offset in range(1, 4):
+            fixtures = list_fixtures_for_date(selected_date + timedelta(days=day_offset), limit=max(limit * 3, 30))
+            if fixtures:
+                break
     recommendations: list[MatchRecommendation] = []
 
     for fixture in fixtures:
@@ -159,7 +165,7 @@ def format_channel_digest(recommendations: list[MatchRecommendation], target_dat
             f"{index}. {kickoff_text}{item.match.home_team} vs {item.match.away_team}"
         )
         lines.append(
-            f"   {item.market_label} @ {item.odds:.2f} | xG {(_safe_metric(item.match.home_xg, 1.35)):.2f}:{(_safe_metric(item.match.away_xg, 1.05)):.2f} | уверенность {item.confidence}/5"
+            f"   Ставка: {translate_market(item.market_label)} @ {item.odds:.2f} | xG {(_safe_metric(item.match.home_xg, 1.35)):.2f}:{(_safe_metric(item.match.away_xg, 1.05)):.2f} | уверенность {item.confidence}/5"
         )
         lines.append(f"   {item.reasoning}")
 
@@ -186,10 +192,10 @@ def format_user_digest(
     ]
     for index, item in enumerate(recommendations, start=1):
         lines.append(
-            f"{index}. {item.match.home_team} vs {item.match.away_team} | {item.market_label} @ {item.odds:.2f}"
+            f"{index}. {item.match.home_team} vs {item.match.away_team} | {translate_market(item.market_label)} @ {item.odds:.2f}"
         )
         lines.append(
-            f"   Ставка: {format_money(item.stake)} руб. | Уверенность: {item.confidence}/5"
+            f"   Рекомендуемая сумма: {format_money(item.stake)} руб. | Уверенность: {item.confidence}/5"
         )
         lines.append(f"   {item.reasoning}")
     return "\n".join(lines)[:3900]
