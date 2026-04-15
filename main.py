@@ -28,11 +28,7 @@ from database.crud import (
     update_prediction_result,
     update_coupon_settlement,
 )
-from modules.ai_analyst import (
-    analyze_news_sentiment,
-    format_prediction_message,
-    generate_prediction,
-)
+from modules.ai_analyst import ai_analyst, PredictionResult
 from modules.bankroll_manager import recommended_stake
 from modules.data_sources import build_match_context, list_fixtures_for_date, FixtureRow
 from modules.daily_digest import (
