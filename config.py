@@ -24,19 +24,21 @@ class Settings:
     database_url: str = os.getenv(
         "DATABASE_URL", "sqlite+aiosqlite:///xg_master_bot.db"
     )
+    sqlalchemy_echo: bool = os.getenv("SQLALCHEMY_ECHO", "0") == "1"
 
-    # Betting
+    # Betting settings
     default_bet_percent: float = float(os.getenv("DEFAULT_BET_PERCENT", "0.03"))
     reserve_bankroll_fraction: float = float(os.getenv("RESERVE_BANKROLL_FRACTION", "0.25"))
     digest_matches_limit: int = int(os.getenv("DIGEST_MATCHES_LIMIT", "12"))
+    digest_post_minute: int = int(os.getenv("DIGEST_POST_MINUTE", "5"))
 
     # AI
     ai_provider: str = os.getenv("AI_PROVIDER", "mock").lower()
     hf_api_token: str = os.getenv("HF_API_TOKEN", "")
     hf_model: str = os.getenv("HF_MODEL", "")
 
-    # === Главное сейчас ===
-    api_football_key: str = os.getenv("API_FOOTBALL_KEY", "")   # ←←← Это обязательно!
+    # === API-Football ===
+    api_football_key: str = os.getenv("API_FOOTBALL_KEY", "")
 
     # Дополнительно
     data_provider: str = os.getenv("DATA_PROVIDER", "api_football").lower()
@@ -46,11 +48,17 @@ class Settings:
 settings = Settings()
 
 
-# Быстрая проверка
-def check_config():
+# Проверка конфигурации при запуске
+def check_config() -> None:
     if not settings.telegram_bot_token:
-        print("❌ TELEGRAM_BOT_TOKEN не найден!")
+        print("❌ ОШИБКА: TELEGRAM_BOT_TOKEN не найден!")
     if not settings.api_football_key:
-        print("❌ API_FOOTBALL_KEY не найден! Матчи не будут загружаться.")
+        print("⚠️  WARNING: API_FOOTBALL_KEY не найден! Матчи не будут загружаться.")
     else:
-        print(f"✅ API_Football ключ загружен ({len(settings.api_football_key)} символов)")
+        print(f"✅ API_Football ключ успешно загружен ({len(settings.api_football_key)} символов)")
+
+    print(f"✅ Database: {settings.database_url.split('://')[0]}")
+    print("✅ Config loaded successfully")
+
+
+check_config()
