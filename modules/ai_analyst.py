@@ -1,359 +1,160 @@
 from __future__ import annotations
 
-import json
-import logging
-from dataclasses import asdict
-from typing import Any
+import matplotlib.pyplot as plt
+import numpy as np
+from dataclasses import dataclass
+from datetime import datetime
+from io import BytesIO
+from typing import Dict, Tuple
 
 import requests
+
 from config import settings
-from modules.bankroll_manager import recommended_stake
-from modules.localization import translate_market, translate_sentiment
-from modules.data_sources import TeamContext
-
-logger = logging.getLogger(__name__)
-
-JSON_SCHEMA_HINT = {
-    "prediction": "П1|X|П2|ТБ2.5|ОЗ|Другое",
-    "reasoning": "краткое объяснение",
-    "confidence": 1,
-    "recommended_stake": 0.0,
-}
+from modules.data_sources import TeamContext, FixtureRow
 
 
-def _resolved_hf_model() -> str:
-    raw_model = (settings.hf_model or "mistralai/Mistral-7B-Instruct-v0.3").strip()
-    model = raw_model.split(":", 1)[0].strip()
-    if model != raw_model:
-        logger.warning("HF model alias '%s' normalized to '%s'", raw_model, model)
-    return model
+@dataclass
+class PredictionResult:
+    home_win_prob: float
+    draw_prob: float
+    away_win_prob: float
+    predicted_home_goals: float
+    predicted_away_goals: float
+    confidence: float          # 0-100
+    value: float               # Value bet (наша вероятность vs odds)
+    recommended_stake: float
+    reasoning: str
+    xg_chart: bytes | None = None   # изображение графика
 
 
-def _team_context_to_text(match: TeamContext) -> str:
-    return (
-        f"Лига: {match.league}\n"
-        f"Матч: {match.home_team} vs {match.away_team}\n"
-        f"Коэффициенты: {match.odds}\n"
-        f"xG хозяев: {match.home_xg}\n"
-        f"xG гостей: {match.away_xg}\n"
-        f"xGA хозяев: {match.home_xga}\n"
-        f"xGA гостей: {match.away_xga}\n"
-        f"Форма хозяев: {match.home_form}\n"
-        f"Форма гостей: {match.away_form}\n"
-        f"Потери состава: {match.injuries}\n"
-        f"Источник: {match.source_notes}"
-    )
+class AiAnalyst:
+    def __init__(self):
+        self.league_attack_strength: Dict[str, float] = {}
+        self.league_defense_strength: Dict[str, float] = {}
 
+    def _get_team_strength(self, league: str, team: str, is_home: bool) -> Tuple[float, float]:
+        """Возвращает attack и defense strength команды (на основе xG)"""
+        # Пока заглушка — в будущем можно кэшировать из API
+        base_attack = 1.35 if is_home else 1.15
+        base_defense = 0.95 if is_home else 1.05
+        return base_attack, base_defense
 
-def build_prediction_prompt(match: TeamContext, bankroll: float, confidence: float = 0.6) -> str:
-    stake = recommended_stake(bankroll, confidence, strategy="flat")
-    return (
-        "Ты футбольный аналитик по ставкам. Верни ТОЛЬКО JSON без markdown. "
-        f"Используй схему: {json.dumps(JSON_SCHEMA_HINT, ensure_ascii=False)}.\n"
-        f"{_team_context_to_text(match)}\n"
-        f"Метаданные: {json.dumps(match.metadata, ensure_ascii=False)}\n"
-        f"Текущий банк: {bankroll}\n"
-        f"Рекомендуемая сумма ставки: {stake}\n"
-        "Предпочитай консервативные рынки и обязательно указывай неопределённость."
-    )
+    def _poisson_prob(self, lam: float, k: int) -> float:
+        """Вероятность забить ровно k голов (Poisson)"""
+        return (lam ** k) * np.exp(-lam) / np.math.factorial(k)
 
+    def _dixon_coles_correction(self, home_goals: int, away_goals: int) -> float:
+        """Корректировка Dixon-Coles для низовых матчей (0-0, 1-0, 0-1, 1-1)"""
+        if home_goals == 0 and away_goals == 0:
+            return 1.3
+        if home_goals == 1 and away_goals == 0:
+            return 0.85
+        if home_goals == 0 and away_goals == 1:
+            return 0.85
+        if home_goals == 1 and away_goals == 1:
+            return 0.9
+        return 1.0
 
-def _extract_json_payload(text: str) -> dict[str, Any]:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("No JSON object found")
-    return json.loads(text[start : end + 1])
+    def generate_prediction(self, context: TeamContext, bankroll: float) -> PredictionResult:
+        """Основная научная модель"""
+        # 1. Получаем силу команд
+        home_attack, home_defense = self._get_team_strength(context.league, context.home_team, True)
+        away_attack, away_defense = self._get_team_strength(context.league, context.away_team, False)
 
+        # 2. Рассчитываем ожидаемые голы (xG)
+        lambda_home = home_attack * away_defense * 1.35   # home advantage
+        lambda_away = away_attack * home_defense * 0.85
 
-def _normalize_prediction_payload(payload: dict[str, Any], bankroll: float) -> dict[str, Any]:
-    prediction = str(payload.get("prediction") or payload.get("pick") or "ОЗ")
-    reasoning = str(payload.get("reasoning") or payload.get("analysis") or "")
-    confidence = int(payload.get("confidence") or 3)
-    recommended_stake_value = payload.get("recommended_stake")
-    if recommended_stake_value is None:
-        recommended_stake_value = recommended_stake(bankroll, confidence / 5.0, strategy="flat")
-    return {
-        "prediction": prediction,
-        "reasoning": reasoning,
-        "confidence": max(1, min(confidence, 5)),
-        "recommended_stake": float(recommended_stake_value),
-        "raw": payload,
-    }
+        # 3. Симулируем вероятности (Poisson + Dixon-Coles)
+        max_goals = 8
+        home_win, draw, away_win = 0.0, 0.0, 0.0
 
+        for h in range(max_goals):
+            for a in range(max_goals):
+                p = (self._poisson_prob(lambda_home, h) *
+                     self._poisson_prob(lambda_away, a) *
+                     self._dixon_coles_correction(h, a))
 
-# ── HuggingFace InferenceClient ────────────────────────────────────────────
+                if h > a:
+                    home_win += p
+                elif h == a:
+                    draw += p
+                else:
+                    away_win += p
 
-def _call_hf_inference_client(prompt: str, max_tokens: int = 512) -> str:
-    """Call HuggingFace Inference API using InferenceClient (huggingface_hub)."""
-    try:
-        from huggingface_hub import InferenceClient  # type: ignore
+        # 4. Нормализация
+        total = home_win + draw + away_win
+        home_win /= total
+        draw /= total
+        away_win /= total
 
-        model = _resolved_hf_model()
-        token = settings.hf_api_token or None
-        client = InferenceClient(model=model, token=token)
-        response = client.text_generation(
-            prompt,
-            max_new_tokens=max_tokens,
-            temperature=0.2,
-            do_sample=True,
+        # 5. Confidence и Value (если есть odds)
+        confidence = max(home_win, draw, away_win) * 100
+        best_prob = max(home_win, draw, away_win)
+        best_outcome = "1" if best_prob == home_win else "X" if best_prob == draw else "2"
+
+        value = 0.0
+        if context.odds and best_outcome in context.odds:
+            decimal_odds = context.odds[best_outcome]
+            implied_prob = 1 / decimal_odds
+            value = (best_prob - implied_prob) / implied_prob * 100
+
+        # 6. Рекомендуемая ставка (Partial Kelly)
+        from modules.bankroll_manager import recommended_stake
+        stake = recommended_stake(
+            bankroll=bankroll,
+            confidence=confidence,
+            odds=context.odds.get(best_outcome) if context.odds else None,
+            strategy="kelly",
+            flat_percent=0.03,
+            kelly_cap=0.25
         )
-        return str(response)
-    except Exception as exc:
-        logger.warning("HF InferenceClient error: %s", exc)
-        raise
+
+        # 7. График xG
+        chart_bytes = self._generate_xg_chart(lambda_home, lambda_away, context)
+
+        reasoning = (
+            f"Ожидаемые голы: {lambda_home:.2f} – {lambda_away:.2f}\n"
+            f"Вероятности: П1 {home_win:.1%} | X {draw:.1%} | П2 {away_win:.1%}\n"
+            f"Value: {value:+.1f}%"
+        )
+
+        return PredictionResult(
+            home_win_prob=home_win,
+            draw_prob=draw,
+            away_win_prob=away_win,
+            predicted_home_goals=lambda_home,
+            predicted_away_goals=lambda_away,
+            confidence=round(confidence),
+            value=round(value, 1),
+            recommended_stake=round(stake, 2),
+            reasoning=reasoning,
+            xg_chart=chart_bytes
+        )
+
+    def _generate_xg_chart(self, home_xg: float, away_xg: float, context: TeamContext) -> bytes:
+        """Генерирует красивый график xG"""
+        fig, ax = plt.subplots(figsize=(8, 5))
+        teams = [context.home_team, context.away_team]
+        xg_values = [home_xg, away_xg]
+
+        bars = ax.bar(teams, xg_values, color=['#1f77b4', '#ff7f0e'])
+        ax.set_ylabel('Expected Goals (xG)')
+        ax.set_title(f'{context.league}\nОжидаемые голы')
+        ax.grid(axis='y', alpha=0.3)
+
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.1,
+                    f'{height:.2f}', ha='center', va='bottom', fontsize=12, fontweight='bold')
+
+        buf = BytesIO()
+        plt.tight_layout()
+        plt.savefig(buf, format='png', dpi=200)
+        plt.close(fig)
+        buf.seek(0)
+        return buf.read()
 
 
-def _call_openai(prompt: str) -> dict[str, Any]:
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
-
-    response = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {settings.openai_api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": settings.openai_model,
-            "messages": [
-                {"role": "system", "content": "You are a concise football betting analyst."},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.2,
-        },
-        timeout=45,
-    )
-    response.raise_for_status()
-    content = response.json()["choices"][0]["message"]["content"]
-    return _extract_json_payload(content)
-
-
-def _call_huggingface(prompt: str) -> dict[str, Any]:
-    """Call HuggingFace — tries InferenceClient first, falls back to raw HTTP."""
-    if not settings.hf_api_token:
-        raise RuntimeError("HF_API_TOKEN is not configured")
-
-    # Try InferenceClient first
-    try:
-        text = _call_hf_inference_client(prompt)
-        return _extract_json_payload(text)
-    except Exception:
-        pass
-
-    # Fallback: raw HTTP inference endpoint
-    response = requests.post(
-        f"{settings.hf_inference_url}/{_resolved_hf_model()}",
-        headers={
-            "Authorization": f"Bearer {settings.hf_api_token}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": 512,
-                "temperature": 0.2,
-                "return_full_text": False,
-            },
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-    data = response.json()
-    if isinstance(data, list) and data:
-        generated = data[0].get("generated_text", "")
-    elif isinstance(data, dict):
-        generated = data.get("generated_text", "") or data.get("text", "")
-    else:
-        generated = ""
-    return _extract_json_payload(str(generated))
-
-
-# ── News Analysis ──────────────────────────────────────────────────────────
-
-def analyze_news_sentiment(news_summary: str, team_name: str) -> str:
-    """
-    Analyse news and return one of: Positive / Negative / Neutral.
-    Uses HF InferenceClient if available, else returns Neutral.
-    """
-    prompt = (
-        f"Ты аналитик футбольных новостей. Оцени фон новостей вокруг команды '{team_name}'.\n"
-        f"Новости:\n{news_summary}\n\n"
-        "Ответь только одним словом: Positive, Negative или Neutral."
-    )
-    try:
-        if settings.ai_provider in {"hf", "huggingface"} and settings.hf_api_token:
-            result = _call_hf_inference_client(prompt, max_tokens=10).strip().split()[0]
-            if result.lower() in {"positive", "negative", "neutral"}:
-                return result.capitalize()
-        elif settings.ai_provider == "openai" and settings.openai_api_key:
-            response = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": settings.openai_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 5,
-                    "temperature": 0.0,
-                },
-                timeout=20,
-            )
-            response.raise_for_status()
-            word = response.json()["choices"][0]["message"]["content"].strip().split()[0]
-            if word.lower() in {"positive", "negative", "neutral"}:
-                return word.capitalize()
-    except Exception as exc:
-        logger.warning("Sentiment analysis failed: %s", exc)
-    return "Neutral"
-
-
-def generate_russian_post(
-    match: TeamContext,
-    prediction: str,
-    reasoning: str,
-    confidence: int,
-    stake: float,
-    bankroll: float,
-    news_sentiment_home: str = "Neutral",
-    news_sentiment_away: str = "Neutral",
-) -> str:
-    """Generate a Russian-language channel post using HF/OpenAI."""
-    odds_home = match.odds.get("home", "?") if match.odds else "?"
-    odds_away = match.odds.get("away", "?") if match.odds else "?"
-    odds_draw = match.odds.get("draw", "?") if match.odds else "?"
-
-    prompt = (
-        "Ты профессиональный каппер. Напиши пост для Telegram-канала о ставке на футбол.\n"
-        f"Матч: {match.home_team} vs {match.away_team} ({match.league})\n"
-        f"xG хозяев: {match.home_xg}, xG гостей: {match.away_xg}\n"
-        f"Форма хозяев: {match.home_form}, Форма гостей: {match.away_form}\n"
-        f"Травмы: {match.injuries}\n"
-        f"Коэффициенты: П1={odds_home}, X={odds_draw}, П2={odds_away}\n"
-        f"Новостной фон хозяев: {translate_sentiment(news_sentiment_home)}, гостей: {translate_sentiment(news_sentiment_away)}\n"
-        f"Прогноз AI: {translate_market(prediction)} (уверенность {confidence}/5)\n"
-        f"Обоснование: {reasoning}\n"
-        f"Рекомендуемая ставка: {stake:.2f} руб. (от банка {bankroll:.2f} руб.)\n\n"
-        "Напиши красивый пост с эмодзи, заголовком, анализом и рекомендацией. "
-        "Тон: профессиональный каппер. Язык: русский. Длина: 200-300 символов."
-    )
-
-    try:
-        if settings.ai_provider in {"hf", "huggingface"} and settings.hf_api_token:
-            return _call_hf_inference_client(prompt, max_tokens=400).strip()
-        elif settings.ai_provider == "openai" and settings.openai_api_key:
-            response = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": settings.openai_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 400,
-                    "temperature": 0.7,
-                },
-                timeout=30,
-            )
-            response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"].strip()
-    except Exception as exc:
-        logger.warning("Russian post generation failed: %s", exc)
-
-    # Fallback: шаблонный пост
-    return (
-        f"⚽️ {match.home_team} vs {match.away_team}\n"
-        f"🏆 {match.league}\n\n"
-        f"📊 xG: {match.home_xg} vs {match.away_xg}\n"
-        f"📈 Форма: {match.home_form} / {match.away_form}\n\n"
-        f"🎯 Прогноз: {translate_market(prediction)}\n"
-        f"💡 {reasoning[:100]}\n\n"
-        f"💰 Ставка: {stake:.2f} руб. | Кф: {odds_home}\n"
-        f"⭐️ Уверенность: {'★' * confidence}{'☆' * (5 - confidence)}"
-    )
-
-
-def format_prediction_message(
-    match: TeamContext,
-    prediction: str,
-    reasoning: str,
-    confidence: int,
-    stake: float,
-    bankroll: float,
-    news_sentiment_home: str = "Neutral",
-    news_sentiment_away: str = "Neutral",
-    prediction_id: int | None = None,
-) -> str:
-    odds = match.odds or {}
-    odds_home = odds.get("home", "?")
-    odds_draw = odds.get("draw", "?")
-    odds_away = odds.get("away", "?")
-    odds_over = odds.get("over_2_5", "?")
-    odds_btts = odds.get("btts_yes", "?")
-    lines = [
-        f"⚽️ <b>{match.home_team} vs {match.away_team}</b>",
-        f"🏆 {match.league}",
-        "",
-        f"📊 xG: {match.home_xg or 'нет данных'} vs {match.away_xg or 'нет данных'}",
-        f"🛡 xGA: {match.home_xga or 'нет данных'} vs {match.away_xga or 'нет данных'}",
-        f"📈 Форма: {match.home_form or 'N/A'} / {match.away_form or 'N/A'}",
-        f"📰 Новости: {translate_sentiment(news_sentiment_home)} / {translate_sentiment(news_sentiment_away)}",
-        "",
-        f"💸 Линия: П1 {odds_home} | X {odds_draw} | П2 {odds_away} | ТБ2.5 {odds_over} | ОЗ {odds_btts}",
-        f"🎯 Наша ставка: <b>{translate_market(prediction)}</b>",
-        f"⭐ Уверенность: {confidence}/5",
-        f"💰 Рекомендуемая сумма: <b>{stake:.2f} руб.</b> от банка {bankroll:.2f} руб.",
-        f"💡 Аргумент: {reasoning}",
-    ]
-    if prediction_id is not None:
-        lines.extend(["", f"🆔 Прогноз #{prediction_id} сохранён."])
-    return "\n".join(lines)
-
-
-def mock_predict(match: TeamContext, bankroll: float) -> dict[str, object]:
-    prompt = build_prediction_prompt(match, bankroll)
-    return {
-        "prediction": "ОЗ",
-        "reasoning": "Использован локальный фолбэк: ставку выбираем по доступным xG, форме и линии без внешней модели.",
-        "confidence": 3,
-        "recommended_stake": recommended_stake(bankroll, 0.6, strategy="flat"),
-        "prompt": prompt,
-        "match": asdict(match),
-    }
-
-
-def generate_prediction(match: TeamContext, bankroll: float) -> dict[str, object]:
-    prompt = build_prediction_prompt(match, bankroll)
-    try:
-        if settings.ai_provider == "openai":
-            payload = _call_openai(prompt)
-            normalized = _normalize_prediction_payload(payload, bankroll)
-            normalized["prompt"] = prompt
-            normalized["match"] = asdict(match)
-            return normalized
-        if settings.ai_provider in {"hf", "huggingface"}:
-            payload = _call_huggingface(prompt)
-            normalized = _normalize_prediction_payload(payload, bankroll)
-            normalized["prompt"] = prompt
-            normalized["match"] = asdict(match)
-            return normalized
-    except Exception as exc:
-        return {
-            "prediction": "ОЗ",
-            "reasoning": f"Внешняя модель недоступна, поэтому использован безопасный локальный фолбэк: {exc}",
-            "confidence": 2,
-            "recommended_stake": recommended_stake(bankroll, 0.4, strategy="flat"),
-            "prompt": prompt,
-            "match": asdict(match),
-        }
-
-    return mock_predict(match, bankroll)
-
-
-def build_retro_report(predictions: list[dict[str, object]]) -> str:
-    payload = {
-        "total_predictions": len(predictions),
-        "predictions": predictions,
-        "summary": "Локальный ретро-отчёт без внешней LLM-аналитики.",
-    }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+# Глобальный экземпляр
+ai_analyst = AiAnalyst()
