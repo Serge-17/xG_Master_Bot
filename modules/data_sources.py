@@ -3,7 +3,7 @@ from __future__ import annotations
 import requests
 from dataclasses import dataclass, field
 from datetime import date
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from config import settings
 
@@ -84,7 +84,6 @@ class ApiFootballClient:
         return fixtures
 
 
-# Глобальный клиент
 client = ApiFootballClient()
 
 
@@ -92,6 +91,7 @@ def list_fixtures_for_date(match_date: date) -> List[FixtureRow]:
     return client.get_fixtures_by_date(match_date)
 
 
+# ←←← Добавленная функция для совместимости с main.py
 def build_match_context(league: str, home_team: str, away_team: str) -> TeamContext:
     """Создаёт контекст матча для AI-анализа"""
     return TeamContext(
