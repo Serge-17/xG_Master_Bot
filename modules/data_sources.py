@@ -3,7 +3,7 @@ from __future__ import annotations
 import requests
 from dataclasses import dataclass, field
 from datetime import date
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 from config import settings
 
@@ -58,12 +58,12 @@ class ApiFootballClient:
             print(f"[API-Football] Error {endpoint}: {e}")
             return []
 
-    def get_fixtures_by_date(self, match_date: date) -> List[FixtureRow]:
+    def get_fixtures_by_date(self, match_date: date, limit: int = 50) -> List[FixtureRow]:
         params = {"date": match_date.strftime("%Y-%m-%d"), "timezone": "UTC"}
         data = self._get("/fixtures", params)
 
         fixtures = []
-        for item in data:
+        for item in data[:limit]:   # применяем лимит
             fix = item.get("fixture", {})
             teams = item.get("teams", {})
             goals = item.get("goals", {})
@@ -87,13 +87,12 @@ class ApiFootballClient:
 client = ApiFootballClient()
 
 
-def list_fixtures_for_date(match_date: date) -> List[FixtureRow]:
-    return client.get_fixtures_by_date(match_date)
+def list_fixtures_for_date(match_date: date, limit: int = 50) -> List[FixtureRow]:
+    """Основная функция с поддержкой limit"""
+    return client.get_fixtures_by_date(match_date, limit=limit)
 
 
-# ←←← Добавленная функция для совместимости с main.py
 def build_match_context(league: str, home_team: str, away_team: str) -> TeamContext:
-    """Создаёт контекст матча для AI-анализа"""
     return TeamContext(
         league=league,
         home_team=home_team,
@@ -107,9 +106,8 @@ def build_match_context(league: str, home_team: str, away_team: str) -> TeamCont
     )
 
 
-# Для совместимости со старым кодом
 def _fixtures_for_manual_league(league_key: str):
     today = date.today()
-    all_f = list_fixtures_for_date(today)
+    all_f = list_fixtures_for_date(today, limit=30)
     filtered = [f for f in all_f if league_key.lower() in f.league.lower()]
     return league_key.title(), filtered
