@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +24,7 @@ from database.crud import (
 from modules.ai_analyst import ai_analyst
 from modules.bankroll_manager import recommended_stake
 from modules.data_sources import build_match_context, list_fixtures_for_date
-from modules.daily_digest import build_personal_today_digest
+from modules.daily_digest import format_user_digest, build_daily_recommendations
 from modules.localization import parse_matchup, resolve_league_name, translate_market, translate_outcome
 from modules.news_parser import build_news_summary
 from modules.ocr_processor import interpret_result, process_coupon_image
@@ -77,9 +76,8 @@ def back_kb() -> InlineKeyboardMarkup:
 async def safe_edit(call: CallbackQuery, text: str, reply_markup=None):
     try:
         await call.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
-    except TelegramBadRequest as e:
-        if "message is not modified" not in str(e).lower():
-            log.warning(f"Edit error: {e}")
+    except TelegramBadRequest:
+        pass
 
 
 async def safe_answer(call: CallbackQuery, text: str = "✅"):
@@ -89,7 +87,7 @@ async def safe_answer(call: CallbackQuery, text: str = "✅"):
         pass
 
 
-# ====================== /start ======================
+# ====================== Команды и Callbacks ======================
 @dp.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
@@ -101,7 +99,6 @@ async def start_handler(message: Message, state: FSMContext):
     )
 
 
-# ====================== Главное меню ======================
 @dp.callback_query(F.data == "menu_main")
 async def cb_main_menu(call: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -109,10 +106,19 @@ async def cb_main_menu(call: CallbackQuery, state: FSMContext):
     await safe_answer(call)
 
 
-# ====================== Точка входа ======================
+@dp.callback_query(F.data == "menu_today")
+async def cb_today(call: CallbackQuery):
+    text = format_user_digest(
+        recommendations=build_daily_recommendations(limit=8),
+        summary={"bankroll": 10000, "winrate": 0, "roi": 0},  # заглушка
+    )
+    await safe_edit(call, text, back_kb())
+    await safe_answer(call)
+
+
+# ====================== Запуск ======================
 async def main():
-    log.info("xG Master Bot started")
-    # Здесь ничего не запускаем — запуск через webhook в webapp.py
+    log.info("xG Master Bot успешно запущен")
 
 
 if __name__ == "__main__":
