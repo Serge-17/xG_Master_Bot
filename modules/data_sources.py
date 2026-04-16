@@ -5,18 +5,27 @@ from datetime import date
 from typing import List, Dict, Any
 from config import settings
 
+# Список ID популярных лиг (для API-Football)
+TOP_LEAGUES = {
+    "🏴󠁧󠁢󠁥󠁮󠁧󠁿 АПЛ": 39,
+    "🇪🇸 Ла Лига": 140,
+    "🇩🇪 Бундеслига": 78,
+    "🇮🇹 Серия А": 135,
+    "🇫🇷 Лига 1": 61,
+    "🇷🇺 РПЛ": 235,
+    "🇪🇺 Лига Чемпионов": 2,
+    "🇪🇺 Лига Европы": 3,
+    "🇳🇱 Эредивизи": 88,
+    "🇵🇹 Примейра": 94
+}
+
 @dataclass
 class TeamContext:
     league: str
     home_team: str
     away_team: str
-    home_xg: float | None = 1.5
-    away_xg: float | None = 1.2
-    home_form: str = ""
-    away_form: str = ""
-    home_xga: float = 1.1 # Ожидаемые пропущенные голы
-    away_xga: float = 1.1
-    odds: Dict[str, float] = field(default_factory=dict)
+    home_xg: float = 1.5
+    away_xg: float = 1.2
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 class ApiFootballClient:
@@ -24,9 +33,13 @@ class ApiFootballClient:
         self.key = settings.api_football_key
         self.base_url = "https://v3.football.api-sports.io"
 
-    def get_fixtures(self, match_date: date):
+    def get_league_fixtures(self, league_id: int):
         headers = {"x-apisports-key": self.key}
-        params = {"date": match_date.strftime("%Y-%m-%d")}
+        params = {
+            "league": league_id, 
+            "season": 2023, # Или 2024 в зависимости от текущего сезона лиги
+            "date": date.today().strftime("%Y-%m-%d")
+        }
         try:
             r = requests.get(f"{self.base_url}/fixtures", headers=headers, params=params, timeout=10)
             return r.json().get("response", [])
@@ -35,26 +48,10 @@ class ApiFootballClient:
 
 client = ApiFootballClient()
 
-def list_fixtures_for_date(match_date: date, limit: int = 50):
-    from dataclasses import dataclass
-    @dataclass
-    class Fixture:
-        league: str; home_team: str; away_team: str; kickoff: str; status: str; source_notes: str; odds: dict
-    
-    raw = client.get_fixtures(match_date)
-    res = []
-    for item in raw[:limit]:
-        res.append(Fixture(
-            league=item['league']['name'],
-            home_team=item['teams']['home']['name'],
-            away_team=item['teams']['away']['name'],
-            kickoff=item['fixture']['date'][11:16],
-            status=item['fixture']['status']['short'],
-            source_notes="API-Football",
-            odds={"home": 2.0, "draw": 3.2, "away": 3.5} # В идеале тянуть из /odds
-        ))
-    return res
+def get_fixtures_by_league(league_id: int):
+    raw = client.get_league_fixtures(league_id)
+    return raw
 
-def build_match_context(league: str, home_team: str, away_team: str) -> TeamContext:
-    # Здесь можно добавить логику запроса статистики команд
-    return TeamContext(league=league, home_team=home_team, away_team=away_team)
+def build_match_context(home: str, away: str, league: str) -> TeamContext:
+    # Здесь можно добавить логику получения реальных xG
+    return TeamContext(league=league, home_team=home, away_team=away)
