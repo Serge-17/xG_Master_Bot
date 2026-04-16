@@ -63,7 +63,7 @@ class ApiFootballClient:
         data = self._get("/fixtures", params)
 
         fixtures = []
-        for item in data[:limit]:   # применяем лимит
+        for item in data[:limit]:
             fix = item.get("fixture", {})
             teams = item.get("teams", {})
             goals = item.get("goals", {})
@@ -88,7 +88,6 @@ client = ApiFootballClient()
 
 
 def list_fixtures_for_date(match_date: date, limit: int = 50) -> List[FixtureRow]:
-    """Основная функция с поддержкой limit"""
     return client.get_fixtures_by_date(match_date, limit=limit)
 
 
