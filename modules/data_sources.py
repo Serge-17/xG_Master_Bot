@@ -19,6 +19,7 @@ class TeamContext:
     away_form: str = ""
     odds: Dict[str, float] | None = None
     source_notes: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)   # ← ДОБАВЛЕНО
 
 
 @dataclass
@@ -61,27 +62,21 @@ class ApiFootballClient:
     def get_fixtures_by_date(self, match_date: date, limit: int = 50) -> List[FixtureRow]:
         params = {"date": match_date.strftime("%Y-%m-%d"), "timezone": "UTC"}
         data = self._get("/fixtures", params)
-
-        fixtures = []
-        for item in data[:limit]:
-            fix = item.get("fixture", {})
-            teams = item.get("teams", {})
-            goals = item.get("goals", {})
-            league_data = item.get("league", {})
-
-            fixtures.append(FixtureRow(
-                league=league_data.get("name", "Unknown League"),
-                home_team=teams.get("home", {}).get("name", "Unknown"),
-                away_team=teams.get("away", {}).get("name", "Unknown"),
+        return [
+            FixtureRow(
+                league=item.get("league", {}).get("name", "Unknown League"),
+                home_team=item.get("teams", {}).get("home", {}).get("name", "Unknown"),
+                away_team=item.get("teams", {}).get("away", {}).get("name", "Unknown"),
                 match_date=match_date,
-                kickoff=fix.get("date", "")[11:16] if fix.get("date") else "",
-                status=fix.get("status", {}).get("short", "NS"),
-                home_score=goals.get("home"),
-                away_score=goals.get("away"),
+                kickoff=item.get("fixture", {}).get("date", "")[11:16] if item.get("fixture", {}).get("date") else "",
+                status=item.get("fixture", {}).get("status", {}).get("short", "NS"),
+                home_score=item.get("goals", {}).get("home"),
+                away_score=item.get("goals", {}).get("away"),
                 source_notes="API-Football",
-                metadata={"fixture_id": fix.get("id")}
-            ))
-        return fixtures
+                metadata={"fixture_id": item.get("fixture", {}).get("id")}
+            )
+            for item in data[:limit]
+        ]
 
 
 client = ApiFootballClient()
@@ -96,12 +91,7 @@ def build_match_context(league: str, home_team: str, away_team: str) -> TeamCont
         league=league,
         home_team=home_team,
         away_team=away_team,
-        home_xg=None,
-        away_xg=None,
-        home_form="",
-        away_form="",
-        odds=None,
-        source_notes="API-Football"
+        metadata={}   # теперь есть
     )
 
 
