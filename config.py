@@ -20,6 +20,9 @@ class Settings:
     telegram_webhook_url: str = os.getenv("TELEGRAM_WEBHOOK_URL", "")
     telegram_channel_id: int = int(os.getenv("CHANNEL_ID", "0") or "0")
 
+    # Paths
+    telegram_download_dir: str = os.getenv("TELEGRAM_DOWNLOAD_DIR", "./downloads")
+
     # Database
     database_url: str = os.getenv(
         "DATABASE_URL", "sqlite+aiosqlite:///xg_master_bot.db"
@@ -37,7 +40,7 @@ class Settings:
     hf_api_token: str = os.getenv("HF_API_TOKEN", "")
     hf_model: str = os.getenv("HF_MODEL", "")
 
-    # === API-Football ===
+    # API-Football (главное)
     api_football_key: str = os.getenv("API_FOOTBALL_KEY", "")
 
     # Дополнительно
@@ -48,16 +51,17 @@ class Settings:
 settings = Settings()
 
 
-# Проверка конфигурации при запуске
+# Проверка конфигурации
 def check_config() -> None:
     if not settings.telegram_bot_token:
         print("❌ ОШИБКА: TELEGRAM_BOT_TOKEN не найден!")
     if not settings.api_football_key:
-        print("⚠️  WARNING: API_FOOTBALL_KEY не найден! Матчи не будут загружаться.")
+        print("⚠️  WARNING: API_FOOTBALL_KEY не найден!")
     else:
         print(f"✅ API_Football ключ успешно загружен ({len(settings.api_football_key)} символов)")
 
     print(f"✅ Database: {settings.database_url.split('://')[0]}")
+    print(f"✅ Download dir: {settings.telegram_download_dir}")
     print("✅ Config loaded successfully")
 
 
