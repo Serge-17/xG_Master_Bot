@@ -2,7 +2,7 @@ aiogram
 requests
 beautifulsoup4
 pandas
+numpy
 scipy
 google-generativeai
 python-dotenv
-matplotlib
