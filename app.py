@@ -71,8 +71,15 @@ async def scan_matches(message: types.Message):
         await message.answer("📉 Сканирование завершено. Валуйных ставок с перевесом >5% сейчас нет.")
 
 async def main():
+    print("Инициализация БД...")
     init_db()
-    print("🚀 Бот запущен и готов к работе!")
+    
+    # ПРИНУДИТЕЛЬНЫЙ СБРОС ВЕБХУКА (РЕШАЕТ ОШИБКУ CONFLICT)
+    print("Сброс вебхука Telegram...")
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    print("🚀 Бот запущен на Hugging Face и готов к работе!")
+    # Запускаем поллинг
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
