@@ -1,0 +1,8 @@
+aiogram
+requests
+beautifulsoup4
+pandas
+scipy
+google-generativeai
+python-dotenv
+matplotlib
