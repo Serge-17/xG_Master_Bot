@@ -4,5 +4,8 @@ apscheduler==3.10.4
 aiogram
 python-dotenv
 aiohttp
+beautifulsoup4
+requests
+lxml
 google-generativeai
 apscheduler
