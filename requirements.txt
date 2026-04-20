@@ -5,7 +5,8 @@ aiogram
 python-dotenv
 aiohttp
 beautifulsoup4
-requests
-lxml
 google-generativeai
-apscheduler
+numpy
+pandas
+scipy
+requests
