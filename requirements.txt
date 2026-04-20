@@ -1,8 +1,4 @@
-aiogram
-requests
-beautifulsoup4
-pandas
-numpy
-scipy
-google-generativeai
-python-dotenv
+python-telegram-bot==20.7
+aiohttp==3.9.5
+apscheduler==3.10.4
+huggingface_hub==0.23.4
