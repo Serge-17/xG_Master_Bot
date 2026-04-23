@@ -1,26 +1,18 @@
 <claude-mem-context>
 # Memory Context
 
-# [xG_Master_Bot] recent context, 2026-04-23 4:13pm GMT+3
+# [xG_Master_Bot] recent context, 2026-04-23 4:33pm GMT+3
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 50 obs (16,689t read) | 274,500t work | 94% savings
+Stats: 50 obs (16,537t read) | 315,522t work | 95% savings
 
 ### Apr 23, 2026
 S188 xG Master Bot — Full Rebuild and Deployment to HuggingFace Space Serge-17/xG_Master_Bot (Apr 23 at 3:31 PM)
 S167 xG Master Bot — Full rebuild of broken Telegram football analytics bot for HuggingFace Space deployment with complete spec implementation (Apr 23 at 3:31 PM)
-310 3:36p ✅ xG Master Bot — requirements.txt Dependencies Slimmed and Unified
-311 " 🔵 HuggingFace CLI Not Installed — Local HF Tokens Not Set in Environment
-312 " ✅ xG Master Bot — config.py Refactored for football-data.org and Gemini 2.0
-313 " 🔵 HuggingFace Space Git Repo Publicly Readable — Write Auth Still Required
-314 3:37p 🔵 xG_Master_Bot main.py Is a Football Betting Signals Bot — Separate from ai-news-bot
-315 " 🔵 xG_Master_Bot requirements.txt Intact — ai-news-bot Space Cloned to /tmp
-316 3:38p 🟣 xG Master Bot — db.py Fully Rewritten with Complete Async CRUD Layer
-317 3:39p 🔴 ai-news-bot Live Space main.py Patched — Crash on Missing GEMINI_TOKEN Fixed, Dead Code Removed
-318 " 🔵 ai-news-bot Patch Syntax-Verified — main.py Still Unstaged After git add
+318 3:39p 🔵 ai-news-bot Patch Syntax-Verified — main.py Still Unstaged After git add
 319 " ✅ ai-news-bot Bugfix Committed to Local Clone — Ready to Push to HF Space
 321 3:40p 🟣 xG Master Bot — data_sources.py Created with Match and Odds API Clients
 322 " 🟣 xG Master Bot — analysis.py Rewritten with Full Poisson + Value Betting Math
@@ -54,6 +46,7 @@ S189 xG Master Bot — Fix Two Critical HuggingFace Space Startup Failures (SSL 
 350 " ✅ ai-news-bot Hardening Patch Pushed to HuggingFace Space — Commit 9323007 Live
 353 3:57p 🔴 xG Master Bot — Telegram HTTP Timeouts Extended for HuggingFace Cold Start
 354 3:58p 🔵 xG Master Bot — SSL DSN Normalization Verified: sslmode=require → ssl=require
+S197 xG Master Bot — IPv4 HTTPXRequest Fix Deployed to HuggingFace Space (commit 1e106f9) (Apr 23 at 3:58 PM)
 357 4:00p 🔴 ai-news-bot — IPv6 Hang Fix: Force IPv4 for Telegram Requests on HuggingFace
 358 " 🔴 ai-news-bot IPv4 Fix Committed and Pushed to HuggingFace Space
 359 4:01p 🔴 ai-news-bot IPv4 Fix Successfully Deployed to HuggingFace Space
@@ -63,7 +56,15 @@ S189 xG Master Bot — Fix Two Critical HuggingFace Space Startup Failures (SSL 
 364 4:07p 🔵 ai-news-bot Git Index Lock Recurs on Each Commit Attempt in /tmp/ai-news-bot
 365 " 🟣 ai-news-bot Fallback Post Formatter Refactored with HTML Formatting and Smart Sentence Extraction
 366 4:09p 🔴 xG Master Bot — IPv4 HTTPXRequest Fix Deployed to HuggingFace Space (commit 1e106f9)
-S197 xG Master Bot — IPv4 HTTPXRequest Fix Deployed to HuggingFace Space (commit 1e106f9) (Apr 23 at 4:09 PM)
+367 4:15p 🔵 xG Master Bot — Startup Crash: HTTPXRequest Does Not Accept httpx_kwargs
+368 " 🔴 xG Master Bot — Fixed HTTPXRequest httpx_kwargs Crash by Switching to PTB Builder Timeouts
+371 4:21p ⚖️ xG Master Bot — Full Technical Specification for Football Analytics Telegram Bot
+S200 xG Master Bot — Full Technical Specification for Football Analytics Telegram Bot (Apr 23 at 4:21 PM)
+372 4:25p 🔵 ai-news-bot — Dual Failure: Gemini Quota Exhausted + Telegram Completely Unreachable
+373 4:27p ⚖️ ai-news-bot — Migration from HuggingFace Space to Render/Koyeb Planned
+374 " 🔵 ai-news-bot Git Commit Blocked by Stale index.lock
+376 " ✅ ai-news-bot — Render/Koyeb Deployment Configs Committed (8ab538b)
+377 4:28p ✅ ai-news-bot — Render/Koyeb Configs Pushed to HuggingFace Space Repo
 
-Access 275k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 316k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
