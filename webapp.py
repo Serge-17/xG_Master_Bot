@@ -51,16 +51,32 @@ async def lifespan(app: FastAPI):
         log.error("TELEGRAM_BOT_TOKEN пуст — бот не запущен.")
     else:
         tg_app = build_application(config.telegram_token)
-        await tg_app.initialize()
-        await tg_app.start()
-        # Снимаем webhook если кто-то выставлял его раньше — иначе polling не работает
-        try:
-            await tg_app.bot.delete_webhook(drop_pending_updates=False)
-        except Exception as e:
-            log.warning("delete_webhook: %s", e)
-        await tg_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        scheduler = start_scheduler(tg_app.bot)
-        log.info("🚀 xG Master Bot started (polling)")
+
+        # Ретраим initialize() — при холодном старте HF Space сеть может
+        # быть не готова, api.telegram.org по первому запросу таймаутит.
+        last_error = None
+        for attempt in range(1, 6):
+            try:
+                await tg_app.initialize()
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                log.warning("tg_app.initialize() attempt %d/5 failed: %s",
+                            attempt, e)
+                await asyncio.sleep(min(5 * attempt, 20))
+        if last_error is not None:
+            log.error("Telegram init всё равно не удался: %s", last_error)
+            tg_app = None
+        else:
+            await tg_app.start()
+            try:
+                await tg_app.bot.delete_webhook(drop_pending_updates=False)
+            except Exception as e:
+                log.warning("delete_webhook: %s", e)
+            await tg_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+            scheduler = start_scheduler(tg_app.bot)
+            log.info("🚀 xG Master Bot started (polling)")
 
     app.state.tg_app = tg_app
     app.state.scheduler = scheduler

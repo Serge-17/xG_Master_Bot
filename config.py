@@ -48,8 +48,11 @@ def _normalize_db_url(url: str) -> str:
         url = "postgresql://" + url[len("postgres://"):]
     if url.startswith("postgresql://") and "+asyncpg" not in url:
         url = "postgresql+asyncpg://" + url[len("postgresql://"):]
-    # asyncpg не понимает sslmode=require в query string — надо ssl=true
-    url = url.replace("sslmode=require", "ssl=true").replace("sslmode=req", "ssl=true")
+    # asyncpg ждёт ssl=<disable|allow|prefer|require|verify-ca|verify-full>,
+    # не понимает sslmode=... в URL и не принимает ssl=true
+    url = url.replace("sslmode=require", "ssl=require")
+    url = url.replace("sslmode=req", "ssl=require")
+    url = url.replace("ssl=true", "ssl=require")
     return url
 
 

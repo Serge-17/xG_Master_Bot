@@ -529,7 +529,19 @@ async def _send_personal_signals(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, u
 # Регистрация хендлеров
 # ────────────────────────────────────────────────────────────────
 def build_application(token: str) -> Application:
-    app = Application.builder().token(token).build()
+    # Более щадящие таймауты — HF Spaces при холодном старте порой долго
+    # поднимают сеть, и первый get_me() падает по дефолтному 5-секундному.
+    app = (
+        Application.builder()
+        .token(token)
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
+        .write_timeout(30.0)
+        .pool_timeout(30.0)
+        .get_updates_connect_timeout(30.0)
+        .get_updates_read_timeout(35.0)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start",   cmd_start))
     app.add_handler(CommandHandler("help",    cmd_help))
