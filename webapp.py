@@ -90,10 +90,13 @@ async def lifespan(app: FastAPI):
         else:
             await tg_app.start()
             try:
-                await tg_app.bot.delete_webhook(drop_pending_updates=False)
+                await tg_app.bot.delete_webhook(drop_pending_updates=True)
             except Exception as e:
                 log.warning("delete_webhook: %s", e)
-            await tg_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+            await tg_app.updater.start_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+            )
             scheduler = start_scheduler(tg_app.bot)
             log.info("🚀 xG Master Bot started (polling)")
 
@@ -129,6 +132,11 @@ app = FastAPI(title="xG Master Bot", version="2.0.0", lifespan=lifespan)
 async def root():
     running = app.state.tg_app is not None if hasattr(app.state, "tg_app") else False
     return {"status": "ok", "bot": "xG Master Bot", "version": "2.0.0", "running": running}
+
+
+@app.head("/")
+async def root_head():
+    return
 
 
 @app.get("/health")
