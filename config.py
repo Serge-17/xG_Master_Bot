@@ -1,129 +1,149 @@
 """
-config.py — центральный конфиг xG Master Bot
-Переменные окружения совпадают с HuggingFace Secrets:
-  BOT_TOKEN, TELEGRAM_TOKEN, GEMINI_API_KEY,
-  FOOTBALL_DATA_API_KEY, ODDS_API_KEY, DATABASE_URL
+config.py — единый источник env-переменных xG Master Bot.
+
+HuggingFace Secrets (ожидаемые имена):
+  TELEGRAM_BOT_TOKEN (или BOT_TOKEN / TELEGRAM_TOKEN)
+  GEMINI_API_KEY
+  FOOTBALL_API_KEY (или FOOTBALL_DATA_API_KEY)
+  ODDS_API_KEY
+  DATABASE_URL           — postgresql://...   (Neon)
+  CHANNEL_ID             — @channel_username или -100xxxxxxxxxx
+  ADMIN_ID               — telegram user id админа (int)
 """
 
+from __future__ import annotations
+
+import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+
+
+log = logging.getLogger(__name__)
+
+
+def _normalize_channel_id(value: str) -> str:
+    """Приводит CHANNEL_ID к формату, который принимает Telegram Bot API.
+      @username  → как есть
+      -100xxxx   → как есть
+      xxxxxx     → добавляем -100 префикс (private channel/supergroup)
+    """
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if v.startswith("@") or v.startswith("-100"):
+        return v
+    if v.startswith("-"):
+        return v
+    if v.isdigit():
+        return f"-100{v}"
+    return v
+
+
+def _normalize_db_url(url: str) -> str:
+    """SQLAlchemy async требует префикс postgresql+asyncpg://.
+    Также чиним частый typo sslmode=req → sslmode=require."""
+    if not url:
+        return ""
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://") and "+asyncpg" not in url:
+        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+    # asyncpg не понимает sslmode=require в query string — надо ssl=true
+    url = url.replace("sslmode=require", "ssl=true").replace("sslmode=req", "ssl=true")
+    return url
 
 
 @dataclass
 class Config:
-    # ── Telegram ──────────────────────────────────────────────
-    # HuggingFace хранит и BOT_TOKEN и TELEGRAM_TOKEN — берём любой
+    # Telegram
     telegram_token: str = field(default_factory=lambda: (
-        os.getenv("BOT_TOKEN") or
-        os.getenv("TELEGRAM_TOKEN") or
-        os.getenv("TELEGRAM_BOT_TOKEN") or
-        ""
+        os.getenv("TELEGRAM_BOT_TOKEN")
+        or os.getenv("BOT_TOKEN")
+        or os.getenv("TELEGRAM_TOKEN")
+        or ""
+    ))
+    channel_id: str = field(default_factory=lambda: _normalize_channel_id(os.getenv("CHANNEL_ID", "")))
+    admin_id: int = field(default_factory=lambda: int(os.getenv("ADMIN_ID", "0") or 0))
+
+    # Внешние API
+    football_api_key: str = field(default_factory=lambda: (
+        os.getenv("FOOTBALL_API_KEY")
+        or os.getenv("FOOTBALL_DATA_API_KEY")
+        or ""
+    ))
+    odds_api_key: str = field(default_factory=lambda: os.getenv("ODDS_API_KEY", ""))
+    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
+
+    # БД — PostgreSQL (Neon). Если не задано — SQLite локально.
+    database_url: str = field(default_factory=lambda: _normalize_db_url(
+        os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./xg_master.db")
     ))
 
-    # ID канала для авто-публикации прогнозов (например: @xg_master_channel)
-    channel_id: str = field(default_factory=lambda: os.getenv("CHANNEL_ID", ""))
+    # Модели и endpoints
+    gemini_model: str = "gemini-2.0-flash"
+    gemini_base: str = "https://generativelanguage.googleapis.com/v1beta/models"
+    football_base: str = "https://api.football-data.org/v4"
+    odds_base: str = "https://api.the-odds-api.com/v4"
 
-    # ID администратора бота
-    admin_id: int = field(default_factory=lambda: int(os.getenv("ADMIN_ID", "0")))
+    # Free tier football-data.org — топ-10 лиг + кубки
+    # PL=EPL, PD=La Liga, BL1=Bundesliga, SA=Serie A, FL1=Ligue 1,
+    # DED=Eredivisie, PPL=Primeira, ELC=Championship, CL=UCL, EL=UEL
+    football_competitions: tuple = (
+        "PL", "PD", "BL1", "SA", "FL1", "DED", "PPL", "ELC", "CL", "EL",
+    )
 
-    # ── Режим запуска ──────────────────────────────────────────
-    # "webhook" для HuggingFace/Railway, "polling" для локальной разработки
-    bot_mode: str = field(default_factory=lambda: os.getenv("BOT_MODE", "webhook"))
+    # Соответствие турниров the-odds-api (h2h + totals)
+    odds_sports: tuple = (
+        "soccer_epl",
+        "soccer_spain_la_liga",
+        "soccer_germany_bundesliga",
+        "soccer_italy_serie_a",
+        "soccer_france_ligue_one",
+        "soccer_netherlands_eredivisie",
+        "soccer_portugal_primeira_liga",
+        "soccer_efl_champ",
+        "soccer_uefa_champs_league",
+        "soccer_uefa_europa_league",
+    )
 
-    # Публичный URL Space на HuggingFace (нужен для webhook)
-    # Формат: https://serge-17-xg-master-bot.hf.space
-    webhook_url: str = field(default_factory=lambda: os.getenv("WEBHOOK_URL", ""))
+    # Риск-менеджмент — Kelly, capped
+    kelly_cap: float = 0.05          # не больше 5% банка на ставку
+    min_confidence: int = 55         # порог уверенности для публикации (%)
+    min_edge: float = 0.03           # порог value: fair_prob * book_odds - 1 >= 3%
 
-    webhook_path: str = "/webhook"
+    # Расписание (UTC)
+    daily_scan_hour: int = 9
+    max_signals_per_day: int = 3
+
+    # HTTP / Space
     webapp_host: str = "0.0.0.0"
     webapp_port: int = field(default_factory=lambda: int(os.getenv("PORT", "7860")))
 
-    # ── Футбольные данные ──────────────────────────────────────
-    # API-Football через api-football.com или RapidAPI
-    # В HuggingFace называется: FOOTBALL_DATA_API_KEY
-    football_api_key: str = field(default_factory=lambda: (
-        os.getenv("FOOTBALL_DATA_API_KEY") or
-        os.getenv("FOOTBALL_API_KEY") or
-        ""
-    ))
-    football_api_base: str = "https://v3.football.api-sports.io"
-
-    # Топ-10 лиг (ID для API-Football)
-    top_leagues: dict = field(default_factory=lambda: {
-        "EPL":        39,   # Англия
-        "La Liga":    140,  # Испания
-        "Bundesliga": 78,   # Германия
-        "Serie A":    135,  # Италия
-        "Ligue 1":    61,   # Франция
-        "Champions":  2,    # Лига Чемпионов
-        "Europa":     3,    # Лига Европы
-        "RPL":        235,  # Россия
-        "Eredivisie": 88,   # Нидерланды
-        "Primeira":   94,   # Португалия
-    })
-
-    # ── Коэффициенты букмекеров ────────────────────────────────
-    # The Odds API — the-odds-api.com
-    # В HuggingFace называется: ODDS_API_KEY
-    odds_api_key: str = field(default_factory=lambda: os.getenv("ODDS_API_KEY", ""))
-    odds_api_base: str = "https://api.the-odds-api.com/v4"
-    odds_regions: str = "eu"          # eu / uk / us / au
-    odds_markets: str = "h2h,totals"  # 1X2, тоталы
-    odds_format: str = "decimal"
-
-    # ── Gemini AI (OCR + аналитика) ────────────────────────────
-    # В HuggingFace называется: GEMINI_API_KEY
-    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
-    gemini_model: str = "gemini-1.5-flash"
-
-    # ── База данных ────────────────────────────────────────────
-    # Для HuggingFace рекомендуется PostgreSQL (neon.tech бесплатно)
-    # Формат: postgresql://user:pass@host/dbname?sslmode=require
-    # Для теста локально: sqlite:///./bot.db
-    database_url: str = field(default_factory=lambda: (
-        os.getenv("DATABASE_URL") or
-        "sqlite:///./bot.db"
-    ))
-
-    # ── Риск-менеджмент ────────────────────────────────────────
-    default_bank: float = 10000.0        # банк по умолчанию (руб.)
-    min_bet_fraction: float = 0.02       # мин. ставка 2% от банка
-    max_bet_fraction: float = 0.10       # макс. ставка 10% от банка
-    value_bet_threshold: float = 0.05    # порог value: наш_odds < букмекер * (1 - 0.05)
-    min_probability: float = 0.55        # мин. вероятность для рекомендации
-
-    # ── Расписание авто-сканирования ───────────────────────────
-    scan_hour_utc: int = 8               # сканировать матчи в 08:00 UTC
-    publish_hour_utc: int = 9            # публиковать прогнозы в 09:00 UTC
-    results_hour_utc: int = 23           # обновлять результаты в 23:00 UTC
-
     def validate(self) -> list[str]:
-        """Проверяет конфигурацию, возвращает список ошибок."""
-        errors = []
+        problems: list[str] = []
         if not self.telegram_token:
-            errors.append("❌ Нет Telegram токена (BOT_TOKEN или TELEGRAM_TOKEN)")
+            problems.append("TELEGRAM_BOT_TOKEN не задан")
+        if not self.gemini_api_key:
+            problems.append("GEMINI_API_KEY не задан (аналитика и OCR работать не будут)")
         if not self.football_api_key:
-            errors.append("❌ Нет FOOTBALL_DATA_API_KEY")
+            problems.append("FOOTBALL_API_KEY не задан (будут демо-матчи)")
         if not self.odds_api_key:
-            errors.append("❌ Нет ODDS_API_KEY")
-        if self.bot_mode == "webhook" and not self.webhook_url:
-            errors.append("⚠️  BOT_MODE=webhook, но WEBHOOK_URL не задан")
-        return errors
+            problems.append("ODDS_API_KEY не задан (будут демо-коэффициенты)")
+        return problems
 
     def summary(self) -> str:
-        """Выводит сводку конфига (без секретов)."""
+        host = "—"
+        if "@" in self.database_url:
+            host = self.database_url.split("@", 1)[1].split("/", 1)[0]
         return (
-            f"Bot mode:     {self.bot_mode}\n"
-            f"Webhook URL:  {self.webhook_url or '—'}\n"
-            f"Football API: {'✅' if self.football_api_key else '❌'}\n"
-            f"Odds API:     {'✅' if self.odds_api_key else '❌'}\n"
-            f"Gemini AI:    {'✅' if self.gemini_api_key else '❌'}\n"
-            f"Database:     {self.database_url.split('@')[-1] if '@' in self.database_url else self.database_url}\n"
-            f"Channel ID:   {self.channel_id or '—'}\n"
-            f"Admin ID:     {self.admin_id or '—'}\n"
+            f"Telegram:  {'✅' if self.telegram_token else '❌'}\n"
+            f"Gemini:    {'✅' if self.gemini_api_key else '❌'}\n"
+            f"Football:  {'✅' if self.football_api_key else '❌'}\n"
+            f"Odds:      {'✅' if self.odds_api_key else '❌'}\n"
+            f"DB host:   {host}\n"
+            f"Channel:   {self.channel_id or '—'}\n"
+            f"Admin:     {self.admin_id or '—'}\n"
         )
 
 
-# Синглтон — импортируй везде как: from config import config
 config = Config()

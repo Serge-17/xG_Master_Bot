@@ -1,28 +1,99 @@
 """
-webapp.py — FastAPI веб-сервер для HuggingFace Spaces
-Запускает Telegram-бота в режиме webhook + health-check эндпоинт.
-HF Spaces требует порт 7860 и публичный HTTPS — webhook идеально подходит.
+webapp.py — FastAPI entry point для HuggingFace Space (port 7860).
+
+HF Space требует слушать :7860. Мы запускаем uvicorn, а внутри lifespan:
+ - инициализируем БД (Neon PostgreSQL),
+ - стартуем Telegram-бота в режиме polling,
+ - включаем планировщик ежедневного скана.
+
+Webhook не используем — polling проще и не требует внешнего URL.
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
-import uvicorn
+from fastapi import FastAPI
+from telegram import Update
 
-# Откладываем импорт бота до старта, чтобы проверить конфиг заранее
-logger = logging.getLogger(__name__)
+from bot import build_application
+from config import config
+from db import init_db
+from scheduler import start_scheduler
 
-app = FastAPI(title="xG Master Bot", version="1.0.0")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+log = logging.getLogger("xg_master")
 
 
-# ── Health check (HuggingFace пингует этот эндпоинт) ──────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    problems = config.validate()
+    for p in problems:
+        log.warning(p)
+    log.info("Config:\n%s", config.summary())
+
+    try:
+        await init_db()
+    except Exception as e:
+        log.exception("init_db failed: %s", e)
+
+    tg_app = None
+    scheduler = None
+    if not config.telegram_token:
+        log.error("TELEGRAM_BOT_TOKEN пуст — бот не запущен.")
+    else:
+        tg_app = build_application(config.telegram_token)
+        await tg_app.initialize()
+        await tg_app.start()
+        # Снимаем webhook если кто-то выставлял его раньше — иначе polling не работает
+        try:
+            await tg_app.bot.delete_webhook(drop_pending_updates=False)
+        except Exception as e:
+            log.warning("delete_webhook: %s", e)
+        await tg_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        scheduler = start_scheduler(tg_app.bot)
+        log.info("🚀 xG Master Bot started (polling)")
+
+    app.state.tg_app = tg_app
+    app.state.scheduler = scheduler
+
+    try:
+        yield
+    finally:
+        log.info("Shutting down...")
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
+        if tg_app is not None:
+            try:
+                await tg_app.updater.stop()
+            except Exception:
+                pass
+            try:
+                await tg_app.stop()
+            except Exception:
+                pass
+            try:
+                await tg_app.shutdown()
+            except Exception:
+                pass
+        log.info("Shutdown complete.")
+
+
+app = FastAPI(title="xG Master Bot", version="2.0.0", lifespan=lifespan)
+
+
 @app.get("/")
 async def root():
-    return {"status": "ok", "bot": "xG Master Bot", "version": "1.0.0"}
+    running = app.state.tg_app is not None if hasattr(app.state, "tg_app") else False
+    return {"status": "ok", "bot": "xG Master Bot", "version": "2.0.0", "running": running}
 
 
 @app.get("/health")
@@ -30,118 +101,9 @@ async def health():
     return {"status": "healthy"}
 
 
-# ── Webhook эндпоинт ───────────────────────────────────────────
-@app.post("/webhook")
-async def telegram_webhook(request: Request):
-    """Принимает обновления от Telegram и передаёт боту."""
-    try:
-        from main import dp, bot
-        import json
-        from aiogram.types import Update
-
-        data = await request.json()
-        update = Update(**data)
-        await dp.feed_update(bot=bot, update=update)
-        return Response(content="OK", status_code=200)
-    except Exception as e:
-        logger.error(f"Webhook error: {e}", exc_info=True)
-        return Response(content="Error", status_code=500)
-
-
-# ── Эндпоинт для ручной проверки конфига ──────────────────────
 @app.get("/config-check")
 async def config_check():
-    try:
-        from config import config
-        errors = config.validate()
-        return {
-            "summary": config.summary(),
-            "errors": errors,
-            "ok": len(errors) == 0
-        }
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-# ── Запуск ─────────────────────────────────────────────────────
-async def setup_webhook():
-    """Регистрирует webhook в Telegram после старта сервера."""
-    try:
-        from config import config
-        from main import bot
-
-        if not config.webhook_url:
-            logger.warning("WEBHOOK_URL не задан — webhook не зарегистрирован")
-            return
-
-        webhook_full_url = config.webhook_url.rstrip("/") + config.webhook_path
-        await bot.set_webhook(url=webhook_full_url)
-        logger.info(f"✅ Webhook зарегистрирован: {webhook_full_url}")
-
-        info = await bot.get_webhook_info()
-        logger.info(f"Webhook info: {info}")
-    except Exception as e:
-        logger.error(f"Ошибка регистрации webhook: {e}", exc_info=True)
-
-
-@app.on_event("startup")
-async def on_startup():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        stream=sys.stdout,
-    )
-    logger.info("🚀 xG Master Bot стартует...")
-
-    try:
-        from config import config
-        errors = config.validate()
-        if errors:
-            for e in errors:
-                logger.warning(e)
-        else:
-            logger.info("✅ Конфиг валиден")
-            logger.info("\n" + config.summary())
-
-        # Запускаем инициализацию БД
-        from database.db import init_db
-        await init_db()
-        logger.info("✅ База данных инициализирована")
-
-        # Регистрируем webhook
-        from config import config as cfg
-        if cfg.bot_mode == "webhook":
-            await setup_webhook()
-
-        # Запускаем планировщик задач
-        try:
-            from modules.scheduler import start_scheduler
-            start_scheduler()
-            logger.info("✅ Планировщик запущен")
-        except ImportError:
-            logger.warning("Модуль scheduler не найден, пропускаем")
-
-    except Exception as e:
-        logger.error(f"Ошибка при запуске: {e}", exc_info=True)
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    try:
-        from main import bot
-        await bot.delete_webhook()
-        await bot.session.close()
-        logger.info("Bot shutdown cleanly")
-    except Exception as e:
-        logger.error(f"Shutdown error: {e}")
-
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "7860"))
-    uvicorn.run(
-        "webapp:app",
-        host="0.0.0.0",
-        port=port,
-        log_level="info",
-        # HuggingFace сам управляет TLS — нам SSL не нужен
-    )
+    return {
+        "summary": config.summary(),
+        "problems": config.validate(),
+    }
