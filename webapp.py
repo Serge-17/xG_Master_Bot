@@ -11,6 +11,25 @@ Webhook не используем — polling проще и не требует 
 
 from __future__ import annotations
 
+# ── IPv4-only egress ──────────────────────────────────────────────
+# HF Space поднимается в IPv4-only сети, но httpx/aiohttp/asyncpg по
+# дефолту резолвят AAAA и пытаются сперва IPv6. Это даёт 30-секундный
+# connect-timeout на каждый исходящий запрос и валит Telegram init.
+# Monkey-патчим socket.getaddrinfo ДО импорта любых сетевых библиотек.
+import socket as _socket
+
+_original_getaddrinfo = _socket.getaddrinfo
+
+
+def _ipv4_only_getaddrinfo(host, port, family=0, *args, **kwargs):
+    if family in (0, _socket.AF_UNSPEC):
+        family = _socket.AF_INET
+    return _original_getaddrinfo(host, port, family, *args, **kwargs)
+
+
+_socket.getaddrinfo = _ipv4_only_getaddrinfo
+
+
 import asyncio
 import logging
 import sys

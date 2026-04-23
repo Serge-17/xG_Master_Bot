@@ -1,22 +1,17 @@
 <claude-mem-context>
 # Memory Context
 
-# [xG_Master_Bot] recent context, 2026-04-23 4:05pm GMT+3
+# [xG_Master_Bot] recent context, 2026-04-23 4:13pm GMT+3
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 50 obs (17,217t read) | 290,320t work | 94% savings
+Stats: 50 obs (16,689t read) | 274,500t work | 94% savings
 
 ### Apr 23, 2026
-302 3:31p 🔵 xG Master Bot — Full Local Codebase Audit Completed
-303 " 🔵 xG Master Bot — Deployment Config Mismatch: requirements.txt vs main.py Runtime
 S188 xG Master Bot — Full Rebuild and Deployment to HuggingFace Space Serge-17/xG_Master_Bot (Apr 23 at 3:31 PM)
 S167 xG Master Bot — Full rebuild of broken Telegram football analytics bot for HuggingFace Space deployment with complete spec implementation (Apr 23 at 3:31 PM)
-305 3:32p 🟣 ai-news-bot main.py Rewritten — HF Inference Replaced with Gemini API (google-genai)
-306 3:33p 🟣 ai-news-bot Local Git Repo Created and Linked to HuggingFace Space
-307 3:34p ⚖️ xG Master Bot — Telegram Token Config Strategy Confirmed
 310 3:36p ✅ xG Master Bot — requirements.txt Dependencies Slimmed and Unified
 311 " 🔵 HuggingFace CLI Not Installed — Local HF Tokens Not Set in Environment
 312 " ✅ xG Master Bot — config.py Refactored for football-data.org and Gemini 2.0
@@ -50,6 +45,7 @@ S167 xG Master Bot — Full rebuild of broken Telegram football analytics bot fo
 343 " ✅ xG Master Bot — .gitignore Created to Exclude DB Files and Build Artifacts
 345 3:50p 🟣 xG Master Bot v2 — Full Rebuild Committed (ccad19a)
 346 " 🟣 xG Master Bot v2 — Deployed to HuggingFace Space Serge-17/xG_Master_Bot
+S189 xG Master Bot — Fix Two Critical HuggingFace Space Startup Failures (SSL DSN + Telegram Cold Start Timeout) (Apr 23 at 3:51 PM)
 347 3:55p 🔴 ai-news-bot main.py — Gemini Quota Backoff and Telegram Resilience Fixes
 348 3:56p 🔵 xG Master Bot — Two Critical Startup Failures on HuggingFace Space Deploy
 349 " ✅ ai-news-bot Hardening Patch Committed — Gemini Backoff and Telegram Resilience
@@ -58,11 +54,16 @@ S167 xG Master Bot — Full rebuild of broken Telegram football analytics bot fo
 350 " ✅ ai-news-bot Hardening Patch Pushed to HuggingFace Space — Commit 9323007 Live
 353 3:57p 🔴 xG Master Bot — Telegram HTTP Timeouts Extended for HuggingFace Cold Start
 354 3:58p 🔵 xG Master Bot — SSL DSN Normalization Verified: sslmode=require → ssl=require
-S189 xG Master Bot — Fix Two Critical HuggingFace Space Startup Failures (SSL DSN + Telegram Cold Start Timeout) (Apr 23 at 3:58 PM)
 357 4:00p 🔴 ai-news-bot — IPv6 Hang Fix: Force IPv4 for Telegram Requests on HuggingFace
 358 " 🔴 ai-news-bot IPv4 Fix Committed and Pushed to HuggingFace Space
 359 4:01p 🔴 ai-news-bot IPv4 Fix Successfully Deployed to HuggingFace Space
 360 4:04p 🔵 xG Master Bot — Telegram init Still Timing Out After IPv4 Fix Deploy
+362 4:05p 🔴 xG Master Bot — HTTPXRequest IPv4 Transport Injected to Fix Telegram Timeout
+363 " 🟣 xG Master Bot — /debug/net Endpoint Added for Network Diagnostics
+364 4:07p 🔵 ai-news-bot Git Index Lock Recurs on Each Commit Attempt in /tmp/ai-news-bot
+365 " 🟣 ai-news-bot Fallback Post Formatter Refactored with HTML Formatting and Smart Sentence Extraction
+366 4:09p 🔴 xG Master Bot — IPv4 HTTPXRequest Fix Deployed to HuggingFace Space (commit 1e106f9)
+S197 xG Master Bot — IPv4 HTTPXRequest Fix Deployed to HuggingFace Space (commit 1e106f9) (Apr 23 at 4:09 PM)
 
-Access 290k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 275k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
