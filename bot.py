@@ -14,6 +14,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
+import httpx
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -28,6 +29,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from ai import parse_receipt
 from analysis import best_value_pick, poisson_probs, xg_from_odds
@@ -528,18 +530,26 @@ async def _send_personal_signals(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, u
 # ────────────────────────────────────────────────────────────────
 # Регистрация хендлеров
 # ────────────────────────────────────────────────────────────────
+def _make_request() -> HTTPXRequest:
+    # HF Spaces выдаёт IPv4-only egress, но httpx по дефолту пробует IPv6
+    # и висит на `connect`, пока таймаут не съест всё время.
+    # local_address="0.0.0.0" принуждает IPv4 на исходящих соединениях.
+    transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=2)
+    return HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=30.0,
+        httpx_kwargs={"transport": transport, "trust_env": False},
+    )
+
+
 def build_application(token: str) -> Application:
-    # Более щадящие таймауты — HF Spaces при холодном старте порой долго
-    # поднимают сеть, и первый get_me() падает по дефолтному 5-секундному.
     app = (
         Application.builder()
         .token(token)
-        .connect_timeout(30.0)
-        .read_timeout(30.0)
-        .write_timeout(30.0)
-        .pool_timeout(30.0)
-        .get_updates_connect_timeout(30.0)
-        .get_updates_read_timeout(35.0)
+        .request(_make_request())
+        .get_updates_request(_make_request())
         .build()
     )
 

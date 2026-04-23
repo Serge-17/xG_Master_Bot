@@ -1,25 +1,18 @@
 <claude-mem-context>
 # Memory Context
 
-# [xG_Master_Bot] recent context, 2026-04-23 3:53pm GMT+3
+# [xG_Master_Bot] recent context, 2026-04-23 4:05pm GMT+3
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 46 obs (17,801t read) | 340,201t work | 95% savings
+Stats: 50 obs (17,217t read) | 290,320t work | 94% savings
 
 ### Apr 23, 2026
-292 3:12p 🔵 HuggingFace Space Serge-17/ai-news-bot — Runtime Status Verified RUNNING
-293 " 🚨 API Tokens Exposed in HuggingFace Space Page HTML (Public)
-294 3:24p 🔵 HF_TOKEN Quota Exhausted — GEMINI_TOKEN Still Active
-295 3:28p ⚖️ xG Master Bot — Full Rebuild Specification Defined
-296 3:29p 🔵 xG Master Bot — Existing Codebase Audit: Fragmented, Partially Implemented, Not Deployable
-298 " 🔵 xG Master Bot — TZ_v2.md Contains Full Technical Specification with Architecture Decisions
-299 3:30p ⚖️ xG Master Bot — Full Rebuild Specification Received
-300 " 🔵 xG Master Bot — Environment Variable Naming Map Confirmed
 302 3:31p 🔵 xG Master Bot — Full Local Codebase Audit Completed
 303 " 🔵 xG Master Bot — Deployment Config Mismatch: requirements.txt vs main.py Runtime
+S188 xG Master Bot — Full Rebuild and Deployment to HuggingFace Space Serge-17/xG_Master_Bot (Apr 23 at 3:31 PM)
 S167 xG Master Bot — Full rebuild of broken Telegram football analytics bot for HuggingFace Space deployment with complete spec implementation (Apr 23 at 3:31 PM)
 305 3:32p 🟣 ai-news-bot main.py Rewritten — HF Inference Replaced with Gemini API (google-genai)
 306 3:33p 🟣 ai-news-bot Local Git Repo Created and Linked to HuggingFace Space
@@ -57,33 +50,19 @@ S167 xG Master Bot — Full rebuild of broken Telegram football analytics bot fo
 343 " ✅ xG Master Bot — .gitignore Created to Exclude DB Files and Build Artifacts
 345 3:50p 🟣 xG Master Bot v2 — Full Rebuild Committed (ccad19a)
 346 " 🟣 xG Master Bot v2 — Deployed to HuggingFace Space Serge-17/xG_Master_Bot
-S188 xG Master Bot — Full Rebuild and Deployment to HuggingFace Space Serge-17/xG_Master_Bot (Apr 23 at 3:51 PM)
-**Investigated**: Full codebase audit of /Users/eliseev/Development/Phyton/xG_Master_Bot. Identified root cause of broken HF Space: requirements.txt had aiogram pinned but actual code used python-telegram-bot. Found 7 dead/duplicate files (main.py, app.py, database.py, football.py, scrapers.py, ai_module.py, test_run.py). Pre-deploy subagent review (43 tool calls) found 1 CRITICAL bug (missing aiosqlite), 2 HIGH bugs (empty photo guard, Kelly float edge case), 1 MEDIUM (callback data size — safe at current scale). Validated all 16 callback_data strings are under Telegram's 64-byte limit. Confirmed CHANNEL_ID=1776948269 in HF Secrets needed -100 prefix normalization. Confirmed TELEGRAM_TOKEN already set in Secrets — token re-entry step skipped per user instruction.
+347 3:55p 🔴 ai-news-bot main.py — Gemini Quota Backoff and Telegram Resilience Fixes
+348 3:56p 🔵 xG Master Bot — Two Critical Startup Failures on HuggingFace Space Deploy
+349 " ✅ ai-news-bot Hardening Patch Committed — Gemini Backoff and Telegram Resilience
+351 " 🔴 xG Master Bot — asyncpg SSL DSN Fix: ssl=true → ssl=require in config.py
+352 " 🔴 xG Master Bot — Telegram Init Retry Loop Added for HuggingFace Cold Start Timeouts
+350 " ✅ ai-news-bot Hardening Patch Pushed to HuggingFace Space — Commit 9323007 Live
+353 3:57p 🔴 xG Master Bot — Telegram HTTP Timeouts Extended for HuggingFace Cold Start
+354 3:58p 🔵 xG Master Bot — SSL DSN Normalization Verified: sslmode=require → ssl=require
+S189 xG Master Bot — Fix Two Critical HuggingFace Space Startup Failures (SSL DSN + Telegram Cold Start Timeout) (Apr 23 at 3:58 PM)
+357 4:00p 🔴 ai-news-bot — IPv6 Hang Fix: Force IPv4 for Telegram Requests on HuggingFace
+358 " 🔴 ai-news-bot IPv4 Fix Committed and Pushed to HuggingFace Space
+359 4:01p 🔴 ai-news-bot IPv4 Fix Successfully Deployed to HuggingFace Space
+360 4:04p 🔵 xG Master Bot — Telegram init Still Timing Out After IPv4 Fix Deploy
 
-**Learned**: - asyncpg rejects sslmode=require in query string — must convert to ssl=true
-    - SQLite fallback path requires aiosqlite which must be explicitly in requirements.txt
-    - Telegram Bot API requires channel IDs as -100XXXXXXXXXX; bare numeric IDs from Secrets need auto-normalization
-    - func.date() on SQLite is safe when using naive UTC datetimes (no tzinfo)
-    - PTB v21 lifecycle: app.initialize() → app.start() → updater.start_polling() (shutdown in reverse)
-    - HuggingFace Space entry point must be FastAPI app on port 7860 with lifespan context manager
-    - Kelly formula book_odds guard uses integer comparison — floats very close to 1.0 pass through (fragile but safe at current scale)
-
-**Completed**: Full xG Master Bot v2 rebuild committed and deployed:
-    - 10 clean async modules: webapp.py, bot.py, config.py, db.py, data_sources.py, analysis.py, ai.py, scanner.py, channel.py, scheduler.py
-    - 3 bug fixes applied before deploy: aiosqlite added to requirements.txt, photo[-1] guard added to bot.py, _normalize_channel_id() added to config.py
-    - .gitignore created (excludes *.db, .env, __pycache__, .DS_Store)
-    - Commit ccad19a: 21 files changed, 1965 insertions, 1487 deletions
-    - git push to https://huggingface.co/spaces/Serge-17/xG_Master_Bot succeeded (206e670..ccad19a)
-    - HF Space container rebuild triggered automatically
-
-**Next Steps**: Verify HuggingFace Space startup — user instructed to:
-    1. Check https://serge-17-xg-master-bot.hf.space/health returns {"status":"healthy"}
-    2. Check /config-check endpoint for missing secrets
-    3. Add CHANNEL_ID secret if not already correct (-100 prefix now auto-applied by config)
-    4. Test /start in Telegram shows 8-button menu
-    5. Test /scan triggers value-bet analysis and channel publish
-    If Space build fails, share Logs tab output for diagnosis.
-
-
-Access 340k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 290k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>

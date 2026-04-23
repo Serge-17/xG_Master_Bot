@@ -123,3 +123,42 @@ async def config_check():
         "summary": config.summary(),
         "problems": config.validate(),
     }
+
+
+@app.get("/debug/net")
+async def debug_net():
+    """Диагностика: добиваемся ли мы до api.telegram.org разными способами."""
+    import socket
+    import aiohttp
+
+    result = {}
+
+    # 1. DNS
+    try:
+        result["dns_v4"] = socket.getaddrinfo(
+            "api.telegram.org", 443, family=socket.AF_INET,
+        )[0][4][0]
+    except Exception as e:
+        result["dns_v4_error"] = str(e)
+    try:
+        result["dns_v6"] = socket.getaddrinfo(
+            "api.telegram.org", 443, family=socket.AF_INET6,
+        )[0][4][0]
+    except Exception as e:
+        result["dns_v6_error"] = str(e)
+
+    # 2. Raw HTTPS через aiohttp (IPv4)
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        connector = aiohttp.TCPConnector(family=socket.AF_INET)
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as s:
+            async with s.get(f"https://api.telegram.org/bot{config.telegram_token}/getMe") as r:
+                result["tg_getMe_status"] = r.status
+                data = await r.json()
+                result["tg_getMe_ok"] = bool(data.get("ok"))
+                if data.get("ok"):
+                    result["bot_username"] = data["result"].get("username")
+    except Exception as e:
+        result["tg_getMe_error"] = f"{type(e).__name__}: {e}"
+
+    return result
