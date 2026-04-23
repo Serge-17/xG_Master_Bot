@@ -1,12 +1,35 @@
-python-telegram-bot==20.7
+# Telegram Bot
+aiogram==3.7.0
+
+# Web server
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+
+# Database
+sqlalchemy==2.0.30
+alembic==1.13.1
+# PostgreSQL драйвер (asyncio)
+asyncpg==0.29.0
+# SQLite async поддержка (для локальной разработки)
+aiosqlite==0.20.0
+
+# HTTP клиент для API запросов
 aiohttp==3.9.5
+httpx==0.27.0
+
+# Gemini AI (OCR + аналитика)
+google-generativeai==0.7.2
+
+# Данные и математика
+pandas==2.2.2
+numpy==1.26.4
+
+# Планировщик задач
 apscheduler==3.10.4
-aiogram
-python-dotenv
-aiohttp
-beautifulsoup4
-google-generativeai
-numpy
-pandas
-scipy
-requests
+
+# Утилиты
+python-dotenv==1.0.1
+pydantic==2.7.1
+
+# Логирование
+loguru==0.7.2
