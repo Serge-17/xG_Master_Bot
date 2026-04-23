@@ -22,4 +22,4 @@ USER 1000
 EXPOSE 7860
 ENV PORT=7860 PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "uvicorn", "webapp:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["sh", "-c", "python -m uvicorn webapp:app --host 0.0.0.0 --port ${PORT:-7860}"]

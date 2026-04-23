@@ -1,32 +1,18 @@
 <claude-mem-context>
 # Memory Context
 
-# [xG_Master_Bot] recent context, 2026-04-23 4:33pm GMT+3
+# [xG_Master_Bot] recent context, 2026-04-23 5:04pm GMT+3
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 50 obs (16,537t read) | 315,522t work | 95% savings
+Stats: 50 obs (16,409t read) | 278,627t work | 94% savings
 
 ### Apr 23, 2026
 S188 xG Master Bot — Full Rebuild and Deployment to HuggingFace Space Serge-17/xG_Master_Bot (Apr 23 at 3:31 PM)
 S167 xG Master Bot — Full rebuild of broken Telegram football analytics bot for HuggingFace Space deployment with complete spec implementation (Apr 23 at 3:31 PM)
-318 3:39p 🔵 ai-news-bot Patch Syntax-Verified — main.py Still Unstaged After git add
-319 " ✅ ai-news-bot Bugfix Committed to Local Clone — Ready to Push to HF Space
-321 3:40p 🟣 xG Master Bot — data_sources.py Created with Match and Odds API Clients
-322 " 🟣 xG Master Bot — analysis.py Rewritten with Full Poisson + Value Betting Math
-323 " 🟣 xG Master Bot — ai.py Created with Gemini Text and Vision Wrappers
-324 3:41p 🟣 xG Master Bot — channel.py Created for Telegram Channel Signal Publishing
-326 " 🟣 xG Master Bot — scanner.py Created as Main Signal Pipeline Orchestrator
-327 3:43p ✅ ai-news-bot HuggingFace Space — main.py Pushed and Verified on Remote
-328 " 🔵 HuggingFace Space Runtime Stage — Not Embeddable in Page HTML
-329 " 🟣 xG Master Bot — bot.py and scheduler.py Created: Full Handler + Auto-Scan Layer
-330 3:44p 🔵 xG Master Bot — webapp.py Still Uses Old Aiogram/Webhook Stack, Needs Rewrite
-332 3:47p 🔵 xG Master Bot — All Telegram Callback Data Within 64-Byte Limit
-333 " 🔵 xG Master Bot — func.date() SQLite Safety Confirmed via Naive UTC Datetimes
-334 " 🔵 xG Master Bot — Dependencies Not Installed in Local Python Environment
-335 " 🔵 xG Master Bot — parse_receipt OCR Contract and handle_photo Safety Guards
+335 3:47p 🔵 xG Master Bot — parse_receipt OCR Contract and handle_photo Safety Guards
 336 " 🔵 xG Master Bot — analysis.py Division-by-Zero Guards in Margin Removal and Kelly Stake
 337 3:48p 🔵 xG Master Bot — Pre-Deploy Bug Review: 3 Real Issues Found
 338 " 🔴 xG Master Bot — CRITICAL Fix: aiosqlite Added to requirements.txt
@@ -65,6 +51,20 @@ S200 xG Master Bot — Full Technical Specification for Football Analytics Teleg
 374 " 🔵 ai-news-bot Git Commit Blocked by Stale index.lock
 376 " ✅ ai-news-bot — Render/Koyeb Deployment Configs Committed (8ab538b)
 377 4:28p ✅ ai-news-bot — Render/Koyeb Configs Pushed to HuggingFace Space Repo
+378 4:33p 🔵 xG Master Bot — Telegram Init Timing Out on HuggingFace Space (Root Cause Confirmed)
+379 " 🔵 xG Master Bot — Telegram Init Timeout Root Cause Confirmed: HuggingFace Blocks Outbound Traffic
+380 4:34p 🔵 xG Master Bot — Full Architecture Mapped: webapp.py IPv4 Monkey-Patch, bot.py PTB Config, HF Network Block Confirmed
+382 4:35p 🔵 ai-news-bot vs xG Master Bot — Both Use IPv4 Workarounds, Both Still Blocked by HuggingFace Network Policy
+383 " 🔵 xG Master Bot — HuggingFace Blocks Telegram Outbound Traffic (Root Cause Confirmed)
+384 4:36p 🔵 xG Master Bot — HuggingFace Space Blocks Outbound Telegram Traffic (Confirmed Again)
+385 " 🔵 xG Master Bot — HuggingFace Blocks Outbound Telegram Traffic (Network-Level)
+386 4:37p 🔵 xG Master Bot /debug/net Endpoint — No Response from HuggingFace Space
+387 " 🔵 xG Master Bot /debug/net — DNS Resolves but Telegram getMe Times Out
+389 " 🔵 xG Master Bot Health Check — FastAPI Running but Bot Not Active
+390 4:57p ⚖️ xG Master Bot — GitHub Repo Clone Requested Locally
+391 " 🔵 xG Master Bot — Project Already Exists Locally, Remote Points to HuggingFace Not GitHub
+392 4:59p 🔵 xG Master Bot — GitHub Repository Does Not Exist
+394 " 🔵 xG Master Bot — Local Branch Diverged from HuggingFace origin/main
 
-Access 316k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 279k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
