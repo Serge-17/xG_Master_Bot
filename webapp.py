@@ -1,9 +1,13 @@
 """
-webapp.py — FastAPI entry point (Render / HuggingFace Space).
+webapp.py — FastAPI entry point (Render Web Service).
 
-Запускает Telegram-бота в режиме polling внутри lifespan FastAPI.
-Render: используй тип сервиса "Background Worker" — тогда нет конфликта
-двух инстансов при деплое. Если хочешь Web Service — переходи на Webhook.
+Режим: WEBHOOK (не polling).
+Telegram сам пушит апдейты на наш HTTPS URL — никакого getUpdates,
+никакого Conflict при деплое двух инстансов.
+
+Обязательная env-переменная:
+  WEBHOOK_URL — публичный HTTPS-URL сервиса, например:
+                https://xg-master-bot.onrender.com
 """
 
 from __future__ import annotations
@@ -25,11 +29,13 @@ _socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 import asyncio
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from telegram import Update
+from telegram.ext import Application
 
 from bot import build_application
 from config import config
@@ -38,8 +44,7 @@ from scheduler import start_scheduler
 
 
 # ── Logging ───────────────────────────────────────────────────────
-# FIX: httpx логирует полный URL с токеном в каждом запросе.
-# Поднимаем его уровень до WARNING — INFO-строки с токеном исчезают.
+# httpx логирует полный URL с токеном → поднимаем до WARNING.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -49,6 +54,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 log = logging.getLogger("xg_master")
+
+# ── Webhook path — секретный суффикс защищает от посторонних запросов ──
+# Telegram будет слать POST на /webhook/<TOKEN_HASH>
+_WEBHOOK_PATH = f"/webhook/{config.telegram_token.split(':')[0]}"
 
 
 @asynccontextmanager
@@ -63,13 +72,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.exception("init_db failed: %s", e)
 
-    tg_app = None
+    tg_app: Application | None = None
     scheduler = None
+
     if not config.telegram_token:
         log.error("TELEGRAM_BOT_TOKEN пуст — бот не запущен.")
     else:
+        webhook_url = os.getenv("WEBHOOK_URL", "").rstrip("/")
+        if not webhook_url:
+            log.error(
+                "WEBHOOK_URL не задан! Добавь env-переменную WEBHOOK_URL=https://<твой-домен.onrender.com>"
+            )
+
         tg_app = build_application(config.telegram_token)
 
+        # Ретраим initialize при холодном старте
         last_error = None
         for attempt in range(1, 6):
             try:
@@ -82,43 +99,29 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(min(5 * attempt, 20))
 
         if last_error is not None:
-            log.error("Telegram init всё равно не удался: %s", last_error)
+            log.error("Telegram init не удался: %s", last_error)
             tg_app = None
         else:
             await tg_app.start()
 
-            # FIX: drop_pending_updates=True в delete_webhook + start_polling
-            # гарантирует, что после рестарта не обрабатываются старые апдейты.
-            # Это устраняет ситуацию когда после конфликта двух инстансов
-            # накапливается очередь необработанных сообщений.
-            try:
-                await tg_app.bot.delete_webhook(drop_pending_updates=True)
-            except Exception as e:
-                log.warning("delete_webhook: %s", e)
-
-            # FIX: добавляем timeout между попытками polling при Conflict.
-            # Если предыдущий инстанс ещё жив — ждём 5 сек и пробуем снова.
-            for poll_attempt in range(1, 4):
+            if webhook_url:
+                full_webhook = f"{webhook_url}{_WEBHOOK_PATH}"
                 try:
-                    await tg_app.updater.start_polling(
-                        allowed_updates=Update.ALL_TYPES,
+                    # setWebhook регистрирует наш URL в Telegram.
+                    # drop_pending_updates=True сбрасывает накопленную очередь.
+                    await tg_app.bot.set_webhook(
+                        url=full_webhook,
                         drop_pending_updates=True,
-                        # При конфликте PTB сам ретраит, но добавим явный
-                        # bootstrap_retries чтобы он не паниковал сразу.
-                        bootstrap_retries=3,
+                        allowed_updates=Update.ALL_TYPES,
                     )
-                    log.info("🚀 xG Master Bot started (polling, attempt %d)", poll_attempt)
-                    break
+                    log.info("✅ Webhook установлен: %s", full_webhook)
                 except Exception as e:
-                    log.warning("start_polling attempt %d/3 failed: %s", poll_attempt, e)
-                    if poll_attempt < 3:
-                        await asyncio.sleep(5)
-                    else:
-                        log.error("Не удалось запустить polling: %s", e)
-                        tg_app = None
+                    log.error("set_webhook failed: %s", e)
+            else:
+                log.warning("Webhook не установлен — WEBHOOK_URL не задан")
 
-            if tg_app is not None:
-                scheduler = start_scheduler(tg_app.bot)
+            scheduler = start_scheduler(tg_app.bot)
+            log.info("🚀 xG Master Bot started (webhook mode)")
 
     app.state.tg_app = tg_app
     app.state.scheduler = scheduler
@@ -130,7 +133,11 @@ async def lifespan(app: FastAPI):
         if scheduler is not None:
             scheduler.shutdown(wait=False)
         if tg_app is not None:
-            for fn in (tg_app.updater.stop, tg_app.stop, tg_app.shutdown):
+            try:
+                await tg_app.bot.delete_webhook()
+            except Exception:
+                pass
+            for fn in (tg_app.stop, tg_app.shutdown):
                 try:
                     await fn()
                 except Exception:
@@ -141,10 +148,29 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="xG Master Bot", version="2.1.0", lifespan=lifespan)
 
 
+# ── Telegram webhook endpoint ─────────────────────────────────────
+@app.post(_WEBHOOK_PATH)
+async def telegram_webhook(request: Request) -> Response:
+    """Принимает апдейты от Telegram и передаёт в PTB."""
+    tg_app: Application | None = getattr(app.state, "tg_app", None)
+    if tg_app is None:
+        return Response(status_code=503, content="Bot not ready")
+    try:
+        data = await request.json()
+        update = Update.de_json(data, tg_app.bot)
+        await tg_app.process_update(update)
+    except Exception as e:
+        log.exception("webhook processing error: %s", e)
+        return Response(status_code=500)
+    return Response(status_code=200)
+
+
+# ── Health / info endpoints ───────────────────────────────────────
 @app.get("/")
 async def root():
     running = getattr(app.state, "tg_app", None) is not None
-    return {"status": "ok", "bot": "xG Master Bot", "version": "2.1.0", "running": running}
+    return {"status": "ok", "bot": "xG Master Bot", "version": "2.1.0",
+            "running": running, "mode": "webhook"}
 
 
 @app.head("/")
@@ -162,34 +188,5 @@ async def config_check():
     return {
         "summary": config.summary(),
         "problems": config.validate(),
+        "webhook_path": _WEBHOOK_PATH,
     }
-
-
-@app.get("/debug/net")
-async def debug_net():
-    import socket
-    import aiohttp
-
-    result = {}
-    try:
-        result["dns_v4"] = socket.getaddrinfo(
-            "api.telegram.org", 443, family=socket.AF_INET,
-        )[0][4][0]
-    except Exception as e:
-        result["dns_v4_error"] = str(e)
-
-    try:
-        timeout = aiohttp.ClientTimeout(total=15)
-        connector = aiohttp.TCPConnector(family=socket.AF_INET)
-        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as s:
-            # FIX: не логируем полный URL с токеном — используем getMe без вывода URL
-            async with s.get(f"https://api.telegram.org/bot{config.telegram_token}/getMe") as r:
-                result["tg_getMe_status"] = r.status
-                data = await r.json()
-                result["tg_getMe_ok"] = bool(data.get("ok"))
-                if data.get("ok"):
-                    result["bot_username"] = data["result"].get("username")
-    except Exception as e:
-        result["tg_getMe_error"] = f"{type(e).__name__}: {e}"
-
-    return result
