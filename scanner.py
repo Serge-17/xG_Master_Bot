@@ -21,11 +21,17 @@ from db import Signal, get_bank, save_signal
 
 log = logging.getLogger(__name__)
 
+# FIX: Семафор — не больше одного параллельного scan_and_publish.
+# Если пользователь нажимает /scan пока уже идёт скан (например, дневной),
+# второй вызов ждёт завершения первого вместо дублирования запросов к API.
+_scan_lock = asyncio.Lock()
+
 
 async def scan_and_build_signals(bank: float, limit: int = 6) -> list[tuple[int, Match]]:
-    """Сканирует сегодняшние матчи и возвращает список (signal_id, Match).
-    Публикует в канал если CHANNEL_ID задан (это делает уже вызывающая сторона).
-    """
+    """Сканирует сегодняшние матчи и возвращает список (signal_id, Match)."""
+
+    # FIX: fetch_matches теперь кэшируется в data_sources.py —
+    # повторные вызовы в течение TTL не делают HTTP-запросов.
     matches = await fetch_matches()
     if not matches:
         log.info("Матчи не найдены")
@@ -86,12 +92,22 @@ async def scan_and_build_signals(bank: float, limit: int = 6) -> list[tuple[int,
 
 
 async def scan_and_publish(bot: Bot, bank: float) -> int:
-    """Полный цикл: скан + публикация в канал. Возвращает число опубликованных."""
-    from db import get_signal
-    signals = await scan_and_build_signals(bank)
-    published = 0
-    for signal_id, match in signals:
-        sig = await get_signal(signal_id)
-        if sig and await publish_signal(bot, sig, match):
-            published += 1
-    return published
+    """Полный цикл: скан + публикация в канал.
+
+    FIX: обёрнут в _scan_lock — гарантирует что одновременно выполняется
+    только один скан. Второй /scan не запускает дублирующие API-запросы,
+    а ждёт завершения текущего.
+    """
+    if _scan_lock.locked():
+        log.info("scan_and_publish: уже выполняется, пропускаем")
+        return 0
+
+    async with _scan_lock:
+        from db import get_signal
+        signals = await scan_and_build_signals(bank)
+        published = 0
+        for signal_id, match in signals:
+            sig = await get_signal(signal_id)
+            if sig and await publish_signal(bot, sig, match):
+                published += 1
+        return published
