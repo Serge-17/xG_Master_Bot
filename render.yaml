@@ -1,0 +1,34 @@
+# render.yaml — конфигурация деплоя на Render
+#
+# КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ:
+# Тип сервиса "worker" (Background Worker) вместо "web".
+# Worker не создаёт HTTP-эндпоинт, поэтому Render не делает
+# health-check и не держит два инстанса одновременно при деплое.
+# Это полностью устраняет ошибку "Conflict: terminated by other getUpdates request".
+#
+# Если тебе НУЖЕН web-эндпоинт (health-check, /config-check и т.д.) —
+# оставь тип "web" но переключи бота на Webhook (см. README).
+
+services:
+  - type: worker          # <-- БЫЛ "web", стал "worker"
+    name: xg-master-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn webapp:app --host 0.0.0.0 --port ${PORT:-10000}
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: FOOTBALL_API_KEY
+        sync: false
+      - key: ODDS_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: PORT
+        value: "10000"
