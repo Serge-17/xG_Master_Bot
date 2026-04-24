@@ -1,14 +1,16 @@
 """
 data_sources.py — клиенты внешних API.
 
-football-data.org  — расписание матчей, составы, турнирная таблица (free tier)
+football-data.org  — расписание матчей (free tier: 10 req/min)
 the-odds-api.com   — коэффициенты букмекеров (h2h + totals)
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -20,6 +22,17 @@ from config import config
 
 
 log = logging.getLogger(__name__)
+
+# ── Rate limit guard ────────────────────────────────────────────
+# football-data.org free tier: 10 req/min ≈ 1 req/6 сек.
+# Берём 7 сек с запасом на сетевой джиттер.
+_FOOTBALL_DELAY_SEC = 7.0
+
+# ── Кэш матчей ──────────────────────────────────────────────────
+# При повторном /scan в течение TTL (config.matches_cache_ttl сек)
+# не делаем новые HTTP-запросы — отдаём закэшированный результат.
+_matches_cache: list["Match"] = []
+_matches_cache_ts: float = 0.0
 
 
 @dataclass
@@ -54,6 +67,8 @@ class Odds:
 # football-data.org — матчи дня
 # ────────────────────────────────────────────────────────────────
 async def fetch_matches(days_ahead: int = 1) -> list[Match]:
+    global _matches_cache, _matches_cache_ts
+
     if not config.football_api_key:
         log.warning("FOOTBALL_API_KEY не задан — демо-матчи")
         return [
@@ -65,6 +80,12 @@ async def fetch_matches(days_ahead: int = 1) -> list[Match]:
                   utc_date=datetime.now(timezone.utc) + timedelta(hours=9)),
         ]
 
+    # ── Кэш: возвращаем сохранённые матчи если TTL не истёк ─────
+    now = time.monotonic()
+    if _matches_cache and (now - _matches_cache_ts) < config.matches_cache_ttl:
+        log.info("fetch_matches: из кэша (%d матчей)", len(_matches_cache))
+        return _matches_cache
+
     date_from = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     date_to = (datetime.now(timezone.utc) + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
     headers = {"X-Auth-Token": config.football_api_key}
@@ -72,14 +93,25 @@ async def fetch_matches(days_ahead: int = 1) -> list[Match]:
     matches: list[Match] = []
     timeout = aiohttp.ClientTimeout(total=15)
 
+    # ── КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: sequential loop с паузой ──────────
+    # Раньше: запросы шли параллельно → все 10 лиг за 1 сек → 429 на 9 из 10.
+    # Теперь: каждый запрос ждёт предыдущий + 7 сек → 0 rate-limit ошибок.
     async with aiohttp.ClientSession(timeout=timeout) as http:
-        for comp in config.football_competitions:
+        for idx, comp in enumerate(config.football_competitions):
+            if idx > 0:
+                await asyncio.sleep(_FOOTBALL_DELAY_SEC)
+
             url = f"{config.football_base}/competitions/{comp}/matches"
             params = {"dateFrom": date_from, "dateTo": date_to, "status": "SCHEDULED,TIMED"}
             try:
                 async with http.get(url, headers=headers, params=params) as r:
                     if r.status == 429:
-                        log.warning("football-data rate limit, пропускаем %s", comp)
+                        log.warning("football-data rate limit на %s, жду 60 сек...", comp)
+                        await asyncio.sleep(60)
+                        continue
+                    if r.status == 403:
+                        # Турнир не включён в текущий план API (CL, EL на free tier)
+                        log.debug("football-data [%s] 403 — нет доступа в плане", comp)
                         continue
                     if r.status != 200:
                         log.warning("football-data [%s] %s", comp, r.status)
@@ -90,7 +122,9 @@ async def fetch_matches(days_ahead: int = 1) -> list[Match]:
                         utc_date = None
                         if m.get("utcDate"):
                             try:
-                                utc_date = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
+                                utc_date = datetime.fromisoformat(
+                                    m["utcDate"].replace("Z", "+00:00")
+                                )
                             except Exception:
                                 pass
                         matches.append(Match(
@@ -104,15 +138,18 @@ async def fetch_matches(days_ahead: int = 1) -> list[Match]:
                 log.error("football-data [%s] error: %s", comp, e)
 
     log.info("Найдено матчей: %d", len(matches))
+
+    # Сохраняем в кэш только если что-то нашли
+    if matches:
+        _matches_cache = matches
+        _matches_cache_ts = time.monotonic()
+
     return matches
 
 
 async def fetch_team_recent_form(team_name: str, limit: int = 5) -> str:
-    """Возвращает строку формы типа 'W W D L W'. Best-effort: при ошибке возвращает '—'."""
     if not config.football_api_key:
         return "— — — — —"
-    # football-data.org v4 /teams?name=... требует точное совпадение.
-    # Для free tier упростим: вернём заглушку (форму посчитает Gemini в analysis).
     return "— — — — —"
 
 
