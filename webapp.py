@@ -1,21 +1,14 @@
 """
-webapp.py — FastAPI entry point для HuggingFace Space (port 7860).
+webapp.py — FastAPI entry point (Render / HuggingFace Space).
 
-HF Space требует слушать :7860. Мы запускаем uvicorn, а внутри lifespan:
- - инициализируем БД (Neon PostgreSQL),
- - стартуем Telegram-бота в режиме polling,
- - включаем планировщик ежедневного скана.
-
-Webhook не используем — polling проще и не требует внешнего URL.
+Запускает Telegram-бота в режиме polling внутри lifespan FastAPI.
+Render: используй тип сервиса "Background Worker" — тогда нет конфликта
+двух инстансов при деплое. Если хочешь Web Service — переходи на Webhook.
 """
 
 from __future__ import annotations
 
 # ── IPv4-only egress ──────────────────────────────────────────────
-# HF Space поднимается в IPv4-only сети, но httpx/aiohttp/asyncpg по
-# дефолту резолвят AAAA и пытаются сперва IPv6. Это даёт 30-секундный
-# connect-timeout на каждый исходящий запрос и валит Telegram init.
-# Monkey-патчим socket.getaddrinfo ДО импорта любых сетевых библиотек.
 import socket as _socket
 
 _original_getaddrinfo = _socket.getaddrinfo
@@ -44,11 +37,17 @@ from db import init_db
 from scheduler import start_scheduler
 
 
+# ── Logging ───────────────────────────────────────────────────────
+# FIX: httpx логирует полный URL с токеном в каждом запросе.
+# Поднимаем его уровень до WARNING — INFO-строки с токеном исчезают.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout,
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 log = logging.getLogger("xg_master")
 
 
@@ -71,8 +70,6 @@ async def lifespan(app: FastAPI):
     else:
         tg_app = build_application(config.telegram_token)
 
-        # Ретраим initialize() — при холодном старте HF Space сеть может
-        # быть не готова, api.telegram.org по первому запросу таймаутит.
         last_error = None
         for attempt in range(1, 6):
             try:
@@ -81,24 +78,47 @@ async def lifespan(app: FastAPI):
                 break
             except Exception as e:
                 last_error = e
-                log.warning("tg_app.initialize() attempt %d/5 failed: %s",
-                            attempt, e)
+                log.warning("tg_app.initialize() attempt %d/5 failed: %s", attempt, e)
                 await asyncio.sleep(min(5 * attempt, 20))
+
         if last_error is not None:
             log.error("Telegram init всё равно не удался: %s", last_error)
             tg_app = None
         else:
             await tg_app.start()
+
+            # FIX: drop_pending_updates=True в delete_webhook + start_polling
+            # гарантирует, что после рестарта не обрабатываются старые апдейты.
+            # Это устраняет ситуацию когда после конфликта двух инстансов
+            # накапливается очередь необработанных сообщений.
             try:
                 await tg_app.bot.delete_webhook(drop_pending_updates=True)
             except Exception as e:
                 log.warning("delete_webhook: %s", e)
-            await tg_app.updater.start_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True,
-            )
-            scheduler = start_scheduler(tg_app.bot)
-            log.info("🚀 xG Master Bot started (polling)")
+
+            # FIX: добавляем timeout между попытками polling при Conflict.
+            # Если предыдущий инстанс ещё жив — ждём 5 сек и пробуем снова.
+            for poll_attempt in range(1, 4):
+                try:
+                    await tg_app.updater.start_polling(
+                        allowed_updates=Update.ALL_TYPES,
+                        drop_pending_updates=True,
+                        # При конфликте PTB сам ретраит, но добавим явный
+                        # bootstrap_retries чтобы он не паниковал сразу.
+                        bootstrap_retries=3,
+                    )
+                    log.info("🚀 xG Master Bot started (polling, attempt %d)", poll_attempt)
+                    break
+                except Exception as e:
+                    log.warning("start_polling attempt %d/3 failed: %s", poll_attempt, e)
+                    if poll_attempt < 3:
+                        await asyncio.sleep(5)
+                    else:
+                        log.error("Не удалось запустить polling: %s", e)
+                        tg_app = None
+
+            if tg_app is not None:
+                scheduler = start_scheduler(tg_app.bot)
 
     app.state.tg_app = tg_app
     app.state.scheduler = scheduler
@@ -110,28 +130,21 @@ async def lifespan(app: FastAPI):
         if scheduler is not None:
             scheduler.shutdown(wait=False)
         if tg_app is not None:
-            try:
-                await tg_app.updater.stop()
-            except Exception:
-                pass
-            try:
-                await tg_app.stop()
-            except Exception:
-                pass
-            try:
-                await tg_app.shutdown()
-            except Exception:
-                pass
+            for fn in (tg_app.updater.stop, tg_app.stop, tg_app.shutdown):
+                try:
+                    await fn()
+                except Exception:
+                    pass
         log.info("Shutdown complete.")
 
 
-app = FastAPI(title="xG Master Bot", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="xG Master Bot", version="2.1.0", lifespan=lifespan)
 
 
 @app.get("/")
 async def root():
-    running = app.state.tg_app is not None if hasattr(app.state, "tg_app") else False
-    return {"status": "ok", "bot": "xG Master Bot", "version": "2.0.0", "running": running}
+    running = getattr(app.state, "tg_app", None) is not None
+    return {"status": "ok", "bot": "xG Master Bot", "version": "2.1.0", "running": running}
 
 
 @app.head("/")
@@ -154,31 +167,22 @@ async def config_check():
 
 @app.get("/debug/net")
 async def debug_net():
-    """Диагностика: добиваемся ли мы до api.telegram.org разными способами."""
     import socket
     import aiohttp
 
     result = {}
-
-    # 1. DNS
     try:
         result["dns_v4"] = socket.getaddrinfo(
             "api.telegram.org", 443, family=socket.AF_INET,
         )[0][4][0]
     except Exception as e:
         result["dns_v4_error"] = str(e)
-    try:
-        result["dns_v6"] = socket.getaddrinfo(
-            "api.telegram.org", 443, family=socket.AF_INET6,
-        )[0][4][0]
-    except Exception as e:
-        result["dns_v6_error"] = str(e)
 
-    # 2. Raw HTTPS через aiohttp (IPv4)
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         connector = aiohttp.TCPConnector(family=socket.AF_INET)
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as s:
+            # FIX: не логируем полный URL с токеном — используем getMe без вывода URL
             async with s.get(f"https://api.telegram.org/bot{config.telegram_token}/getMe") as r:
                 result["tg_getMe_status"] = r.status
                 data = await r.json()
