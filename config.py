@@ -22,11 +22,6 @@ log = logging.getLogger(__name__)
 
 
 def _normalize_channel_id(value: str) -> str:
-    """Приводит CHANNEL_ID к формату, который принимает Telegram Bot API.
-      @username  → как есть
-      -100xxxx   → как есть
-      xxxxxx     → добавляем -100 префикс (private channel/supergroup)
-    """
     v = (value or "").strip()
     if not v:
         return ""
@@ -40,16 +35,12 @@ def _normalize_channel_id(value: str) -> str:
 
 
 def _normalize_db_url(url: str) -> str:
-    """SQLAlchemy async требует префикс postgresql+asyncpg://.
-    Также чиним частый typo sslmode=req → sslmode=require."""
     if not url:
         return ""
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
     if url.startswith("postgresql://") and "+asyncpg" not in url:
         url = "postgresql+asyncpg://" + url[len("postgresql://"):]
-    # asyncpg ждёт ssl=<disable|allow|prefer|require|verify-ca|verify-full>,
-    # не понимает sslmode=... в URL и не принимает ssl=true
     url = url.replace("sslmode=require", "ssl=require")
     url = url.replace("sslmode=req", "ssl=require")
     url = url.replace("ssl=true", "ssl=require")
@@ -77,7 +68,7 @@ class Config:
     odds_api_key: str = field(default_factory=lambda: os.getenv("ODDS_API_KEY", ""))
     gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
 
-    # БД — PostgreSQL (Neon). Если не задано — SQLite локально.
+    # БД
     database_url: str = field(default_factory=lambda: _normalize_db_url(
         os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./xg_master.db")
     ))
@@ -88,14 +79,19 @@ class Config:
     football_base: str = "https://api.football-data.org/v4"
     odds_base: str = "https://api.the-odds-api.com/v4"
 
-    # Free tier football-data.org — топ-10 лиг + кубки
-    # PL=EPL, PD=La Liga, BL1=Bundesliga, SA=Serie A, FL1=Ligue 1,
-    # DED=Eredivisie, PPL=Primeira, ELC=Championship, CL=UCL, EL=UEL
+    # FIX: Убраны EL (Europa League) и CL (Champions League) — дают 403 на free tier.
+    # Free tier football-data.org включает только национальные лиги.
     football_competitions: tuple = (
-        "PL", "PD", "BL1", "SA", "FL1", "DED", "PPL", "ELC", "CL", "EL",
+        "PL",   # Premier League
+        "PD",   # La Liga
+        "BL1",  # Bundesliga
+        "SA",   # Serie A
+        "FL1",  # Ligue 1
+        "DED",  # Eredivisie
+        "PPL",  # Primeira Liga
+        "ELC",  # Championship
     )
 
-    # Соответствие турниров the-odds-api (h2h + totals)
     odds_sports: tuple = (
         "soccer_epl",
         "soccer_spain_la_liga",
@@ -105,14 +101,12 @@ class Config:
         "soccer_netherlands_eredivisie",
         "soccer_portugal_primeira_liga",
         "soccer_efl_champ",
-        "soccer_uefa_champs_league",
-        "soccer_uefa_europa_league",
     )
 
-    # Риск-менеджмент — Kelly, capped
-    kelly_cap: float = 0.05          # не больше 5% банка на ставку
-    min_confidence: int = 55         # порог уверенности для публикации (%)
-    min_edge: float = 0.03           # порог value: fair_prob * book_odds - 1 >= 3%
+    # Риск-менеджмент
+    kelly_cap: float = 0.05
+    min_confidence: int = 55
+    min_edge: float = 0.03
 
     # Расписание (UTC)
     daily_scan_hour: int = 9
@@ -121,6 +115,10 @@ class Config:
     # HTTP / Space
     webapp_host: str = "0.0.0.0"
     webapp_port: int = field(default_factory=lambda: int(os.getenv("PORT", "7860")))
+
+    # FIX: TTL кэша матчей в секундах (60 мин). Предотвращает повторные
+    # запросы к API при нескольких /scan подряд.
+    matches_cache_ttl: int = 3600
 
     def validate(self) -> list[str]:
         problems: list[str] = []
