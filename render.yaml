@@ -1,16 +1,11 @@
-# render.yaml — конфигурация деплоя на Render
+# render.yaml — деплой на Render в режиме Webhook (Web Service)
 #
-# КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ:
-# Тип сервиса "worker" (Background Worker) вместо "web".
-# Worker не создаёт HTTP-эндпоинт, поэтому Render не делает
-# health-check и не держит два инстанса одновременно при деплое.
-# Это полностью устраняет ошибку "Conflict: terminated by other getUpdates request".
-#
-# Если тебе НУЖЕН web-эндпоинт (health-check, /config-check и т.д.) —
-# оставь тип "web" но переключи бота на Webhook (см. README).
+# Тип "web" — правильный для webhook-режима.
+# Render назначает публичный HTTPS-URL → указываем его в WEBHOOK_URL.
+# Никакого polling → никакого Conflict при деплое.
 
 services:
-  - type: worker          # <-- БЫЛ "web", стал "worker"
+  - type: web
     name: xg-master-bot
     runtime: python
     buildCommand: pip install -r requirements.txt
@@ -32,3 +27,6 @@ services:
         sync: false
       - key: PORT
         value: "10000"
+      # ВАЖНО: замени на свой реальный URL из Render dashboard
+      - key: WEBHOOK_URL
+        value: "https://xg-master-bot.onrender.com"
