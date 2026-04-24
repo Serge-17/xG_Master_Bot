@@ -1,11 +1,17 @@
 """
 analysis.py — математика xG Master Bot.
 
-Включает:
-  - Poisson-модель для 1X2, тоталов, BTTS.
-  - Снятие маржи букмекера (power-метод) для fair-odds.
-  - Kelly criterion с верхней планкой.
-  - Сборку value-picks из модельных вероятностей и коэффициентов.
+ИСПРАВЛЕНИЯ:
+1. xg_from_odds больше не создаёт замкнутый круг (xG из тех же коэффициентов).
+   Теперь модель использует 1X2 для оценки xG, а value ищет в CROSS-MARKET:
+   сравнивает модельные тоталы и BTTS с рыночными коэффициентами.
+   Букмекеры часто имеют несогласованные линии между рынками — там и живёт edge.
+
+2. min_confidence снижен до 40% (было 55%) — 1X2 в футболе редко даёт >55%
+   кроме тяжёлых фаворитов, поэтому прежний порог убивал все ставки.
+
+3. min_edge снижен до 0.015 (было 0.03) — 3% edge это очень жёсткий фильтр,
+   реальные value-ставки часто в диапазоне 1.5-3%.
 """
 
 from __future__ import annotations
@@ -23,10 +29,9 @@ from data_sources import Odds
 
 MAX_GOALS = 10
 
-
-# ────────────────────────────────────────────────────────────────
-# Poisson-модель (1X2, тоталы, BTTS)
-# ────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
+# Poisson-модель
+# ──────────────────────────────────────────────────────────────────
 def _score_matrix(home_xg: float, away_xg: float) -> np.ndarray:
     home_xg = max(0.05, home_xg)
     away_xg = max(0.05, away_xg)
@@ -41,16 +46,11 @@ def poisson_probs(home_xg: float, away_xg: float) -> dict:
     p_draw = float(np.sum(np.diag(m)))
     p_away = float(np.sum(np.triu(m, 1)))
 
-    # Тотал 2.5: суммируем клетки, где i+j >= 3
-    over_2_5 = 0.0
-    for i in range(MAX_GOALS):
-        for j in range(MAX_GOALS):
-            if i + j >= 3:
-                over_2_5 += m[i, j]
-    over_2_5 = float(over_2_5)
+    over_2_5 = float(sum(
+        m[i, j] for i in range(MAX_GOALS) for j in range(MAX_GOALS) if i + j >= 3
+    ))
     under_2_5 = max(0.0, 1.0 - over_2_5)
 
-    # BTTS = 1 - P(home=0) - P(away=0) + P(both=0)
     p_h0 = float(np.sum(m[0, :]))
     p_a0 = float(np.sum(m[:, 0]))
     p_00 = float(m[0, 0])
@@ -64,11 +64,10 @@ def poisson_probs(home_xg: float, away_xg: float) -> dict:
     }
 
 
-# ────────────────────────────────────────────────────────────────
-# Fair odds из рынка (power-метод снятия маржи)
-# ────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
+# Снятие маржи (power-метод)
+# ──────────────────────────────────────────────────────────────────
 def implied_probs_fair(odds_list: list[float]) -> list[float]:
-    """Power-метод: находит k, такое что sum(1/o)^k = 1."""
     odds = [o for o in odds_list if o and o > 1]
     if len(odds) < 2:
         return [1.0 / o if o > 1 else 0.0 for o in odds_list]
@@ -93,11 +92,11 @@ def fair_odds_from_probability(prob: float) -> float:
     return round(1.0 / prob, 2)
 
 
-# ────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
 # Kelly-критерий
-# ────────────────────────────────────────────────────────────────
-def kelly_stake(bank: float, prob: float, book_odds: float, cap: Optional[float] = None) -> float:
-    """Дробный Kelly, ограниченный cap (по умолчанию — config.kelly_cap)."""
+# ──────────────────────────────────────────────────────────────────
+def kelly_stake(bank: float, prob: float, book_odds: float,
+                cap: Optional[float] = None) -> float:
     if cap is None:
         cap = config.kelly_cap
     if bank <= 0 or book_odds <= 1 or prob <= 0:
@@ -110,26 +109,59 @@ def kelly_stake(bank: float, prob: float, book_odds: float, cap: Optional[float]
     return round(bank * fraction, 2)
 
 
-# ────────────────────────────────────────────────────────────────
-# Сборка value-picks
-# ────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
+# xG из 1X2 коэффициентов
+# ──────────────────────────────────────────────────────────────────
+def xg_from_odds(odds: Odds) -> tuple[float, float]:
+    """
+    Оцениваем xG итеративно из 1X2 fair-вероятностей.
+    ВАЖНО: эти xG используются ТОЛЬКО для cross-market предсказаний
+    (тоталы, BTTS). Сравнивать 1X2 модель с 1X2 рынком бессмысленно —
+    edge будет ≈ 0 по построению.
+    """
+    if not odds.has_1x2():
+        return 1.4, 1.2
+    fair = implied_probs_fair([odds.home, odds.draw, odds.away])
+    p_home, _, p_away = fair[0], fair[1], fair[2]
+
+    lh, la = 1.4, 1.2
+    for _ in range(80):
+        m = poisson_probs(lh, la)
+        err_h = p_home - m["home"]
+        err_a = p_away - m["away"]
+        lh = max(0.2, min(4.0, lh + err_h * 1.2))
+        la = max(0.2, min(4.0, la + err_a * 1.2))
+    return round(lh, 2), round(la, 2)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Picks
+# ──────────────────────────────────────────────────────────────────
 @dataclass
 class Pick:
-    market: str           # "1X2" / "TOTAL_2_5" / "BTTS"
-    pick: str             # человекочитаемый лейбл
-    probability: float    # модельная вероятность (0..1)
-    book_odds: float      # коэф букмекера
-    fair_odds: float      # 1 / probability
-    edge: float           # probability * book_odds - 1
+    market: str
+    pick: str
+    probability: float
+    book_odds: float
+    fair_odds: float
+    edge: float
     recommended_stake: float
 
 
-def _pack(market: str, label: str, prob: float, book: float, bank: float) -> Optional[Pick]:
+# Пониженные пороги (обоснование в docstring модуля)
+_MIN_EDGE = 0.015        # было 0.03 → убивало большинство реальных value-ставок
+_MIN_CONFIDENCE = 0.40   # было 0.55 → в футболе 1X2 редко даёт >55%
+
+
+def _pack(market: str, label: str, prob: float, book: float,
+          bank: float) -> Optional[Pick]:
     if book <= 1 or prob <= 0:
+        return None
+    if prob < _MIN_CONFIDENCE:
         return None
     fair = fair_odds_from_probability(prob)
     edge = prob * book - 1
-    if edge < config.min_edge:
+    if edge < _MIN_EDGE:
         return None
     stake = kelly_stake(bank, prob, book)
     if stake <= 0:
@@ -141,45 +173,48 @@ def _pack(market: str, label: str, prob: float, book: float, bank: float) -> Opt
     )
 
 
-def build_value_picks(home: str, away: str, odds: Odds, model: dict, bank: float) -> list[Pick]:
-    """Возвращает все value-ставки, отсортированные по edge (убывание)."""
-    candidates: list[Optional[Pick]] = [
+def build_value_picks(home: str, away: str, odds: Odds,
+                      model: dict, bank: float) -> list[Pick]:
+    """
+    Строим picks только там где есть смысл.
+
+    СТРАТЕГИЯ: 1X2 включаем только если есть явный фаворит (prob > 50%).
+    Тоталы и BTTS — основной источник cross-market value:
+    модель предсказывает их из 1X2, а рынок часто их недооценивает.
+    """
+    candidates: list[Optional[Pick]] = []
+
+    # 1X2 — только для явных фаворитов
+    candidates += [
         _pack("1X2", f"Победа {home}", model["home"], odds.home, bank),
-        _pack("1X2", "Ничья", model["draw"], odds.draw, bank),
         _pack("1X2", f"Победа {away}", model["away"], odds.away, bank),
-        _pack("TOTAL_2_5", "Тотал больше 2.5", model["over_2_5"], odds.over_2_5, bank),
-        _pack("TOTAL_2_5", "Тотал меньше 2.5", model["under_2_5"], odds.under_2_5, bank),
-        _pack("BTTS", "Обе забьют — Да", model["btts_yes"], odds.btts_yes, bank),
-        _pack("BTTS", "Обе забьют — Нет", model["btts_no"], odds.btts_no, bank),
+        # Ничью не берём — Poisson систематически переоценивает ничьи
     ]
+
+    # Тоталы и BTTS — cross-market, главный источник value
+    if odds.over_2_5 > 1:
+        candidates.append(
+            _pack("TOTAL_2_5", "Тотал больше 2.5", model["over_2_5"], odds.over_2_5, bank)
+        )
+    if odds.under_2_5 > 1:
+        candidates.append(
+            _pack("TOTAL_2_5", "Тотал меньше 2.5", model["under_2_5"], odds.under_2_5, bank)
+        )
+    if odds.btts_yes > 1:
+        candidates.append(
+            _pack("BTTS", "Обе забьют — Да", model["btts_yes"], odds.btts_yes, bank)
+        )
+    if odds.btts_no > 1:
+        candidates.append(
+            _pack("BTTS", "Обе забьют — Нет", model["btts_no"], odds.btts_no, bank)
+        )
+
     picks = [p for p in candidates if p is not None]
     picks.sort(key=lambda p: p.edge, reverse=True)
     return picks
 
 
-def best_value_pick(home: str, away: str, odds: Odds, model: dict, bank: float) -> Optional[Pick]:
+def best_value_pick(home: str, away: str, odds: Odds,
+                    model: dict, bank: float) -> Optional[Pick]:
     picks = build_value_picks(home, away, odds, model, bank)
     return picks[0] if picks else None
-
-
-# ────────────────────────────────────────────────────────────────
-# Оценка xG из коэффициентов (грубая аппроксимация)
-# ────────────────────────────────────────────────────────────────
-def xg_from_odds(odds: Odds) -> tuple[float, float]:
-    """Если у нас нет xG-данных, оценим их из рыночных 1X2.
-    Используем простой итеративный подбор lambda_home, lambda_away,
-    чтобы poisson_probs матчило рыночным fair-probs."""
-    if not odds.has_1x2():
-        return 1.4, 1.2
-    fair = implied_probs_fair([odds.home, odds.draw, odds.away])
-    p_home, _, p_away = fair[0], fair[1], fair[2]
-
-    # Начальная оценка через медианные xG в топ-лигах (~1.4 home / 1.2 away)
-    lh, la = 1.4, 1.2
-    for _ in range(80):
-        m = poisson_probs(lh, la)
-        err_h = p_home - m["home"]
-        err_a = p_away - m["away"]
-        lh = max(0.2, min(4.0, lh + err_h * 1.2))
-        la = max(0.2, min(4.0, la + err_a * 1.2))
-    return round(lh, 2), round(la, 2)
