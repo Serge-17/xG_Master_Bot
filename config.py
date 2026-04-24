@@ -105,12 +105,12 @@ class Config:
 
     # Риск-менеджмент
     kelly_cap: float = 0.05
-    min_confidence: int = 55
-    min_edge: float = 0.03
+    min_confidence: int = 40
+    min_edge: float = 0.015
 
     # Расписание (UTC)
     daily_scan_hour: int = 9
-    max_signals_per_day: int = 3
+    max_signals_per_day: int = 5
 
     # HTTP / Space
     webapp_host: str = "0.0.0.0"
