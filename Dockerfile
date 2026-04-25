@@ -1,11 +1,8 @@
-# HuggingFace Spaces — порт 7860, user 1000
+# Railway-optimised Dockerfile
 FROM python:3.11-slim
 
-# gcc нужен для сборки numpy/scipy; остальное — минимально
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libffi-dev \
-    libssl-dev \
+    gcc libffi-dev libssl-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -16,10 +13,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY . .
 
-RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
-USER 1000
+ENV PYTHONUNBUFFERED=1
+ENV PORT=8000
 
-EXPOSE 7860
-ENV PORT=7860 PYTHONUNBUFFERED=1
+EXPOSE $PORT
 
-CMD ["sh", "-c", "python -m uvicorn webapp:app --host 0.0.0.0 --port ${PORT:-7860}"]
+CMD ["sh", "-c", "python -m uvicorn webapp:app --host 0.0.0.0 --port ${PORT:-8000}"]
