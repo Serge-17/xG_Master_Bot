@@ -1,4 +1,3 @@
-# Railway-optimised Dockerfile
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -14,8 +13,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 ENV PYTHONUNBUFFERED=1
-ENV PORT=8000
 
-EXPOSE $PORT
+# НЕ задаём PORT здесь — Railway сам инжектит его как env-переменную
+# EXPOSE без номера порта — Railway сам определит
 
 CMD ["sh", "-c", "python -m uvicorn webapp:app --host 0.0.0.0 --port ${PORT:-8000}"]
