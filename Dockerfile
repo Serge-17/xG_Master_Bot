@@ -4,17 +4,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libffi-dev libssl-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
+# HF Spaces требует non-root пользователя
+RUN useradd -m -u 1000 user
+USER user
+ENV HOME=/home/user \
+    PATH=/home/user/.local/bin:$PATH
+
 WORKDIR /app
 
-COPY requirements.txt .
+COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY --chown=user . .
 
 ENV PYTHONUNBUFFERED=1
 
-# НЕ задаём PORT здесь — Railway сам инжектит его как env-переменную
-# EXPOSE без номера порта — Railway сам определит
+EXPOSE 7860
 
-CMD ["sh", "-c", "python -m uvicorn webapp:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "python -m uvicorn webapp:app --host 0.0.0.0 --port ${PORT:-7860}"]

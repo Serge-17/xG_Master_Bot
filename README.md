@@ -2,10 +2,11 @@
 title: xG Master Bot
 emoji: ⚽
 colorFrom: green
-colorTo: indigo
+colorTo: blue
 sdk: docker
 pinned: false
+short_description: Football xG analytics Telegram bot
 ---
 
-# xG Master Bot v2
-AI-ассистент для анализа футбольных матчей на основе xG и Gemini AI.
+# xG Master Bot
+Telegram-бот для анализа футбольной статистики xG, прогнозов и ставок.
