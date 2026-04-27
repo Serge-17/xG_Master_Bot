@@ -92,8 +92,35 @@ class TeamForm:
 async def fetch_matches(days_ahead: int = 1) -> list[Match]:
     global _matches_cache, _matches_cache_ts
 
+    now = time.monotonic()
+    if _matches_cache and (now - _matches_cache_ts) < config.matches_cache_ttl:
+        log.info("fetch_matches: из кэша (%d матчей)", len(_matches_cache))
+        return _matches_cache
+
+    try:
+        from web_scrapers import scrape_sports_ru_matches
+
+        scraped = await scrape_sports_ru_matches()
+        if scraped:
+            matches = [
+                Match(
+                    home=item["home"],
+                    away=item["away"],
+                    competition=item["competition"],
+                    utc_date=item.get("utc_date"),
+                    external_id="",
+                )
+                for item in scraped
+            ]
+            _matches_cache = matches
+            _matches_cache_ts = time.monotonic()
+            log.info("Найдено матчей через sports.ru: %d", len(matches))
+            return matches
+    except Exception as e:
+        log.warning("sports.ru matches fallback failed: %s", e)
+
     if not config.football_api_key:
-        log.warning("FOOTBALL_API_KEY не задан — демо-матчи")
+        log.warning("FOOTBALL_API_KEY не задан и sports.ru не отдал матчи — демо-матчи")
         return [
             Match("Real Madrid", "Barcelona", "La Liga",
                   utc_date=datetime.now(timezone.utc) + timedelta(hours=3)),
@@ -102,11 +129,6 @@ async def fetch_matches(days_ahead: int = 1) -> list[Match]:
             Match("Bayern München", "Borussia Dortmund", "Bundesliga",
                   utc_date=datetime.now(timezone.utc) + timedelta(hours=9)),
         ]
-
-    now = time.monotonic()
-    if _matches_cache and (now - _matches_cache_ts) < config.matches_cache_ttl:
-        log.info("fetch_matches: из кэша (%d матчей)", len(_matches_cache))
-        return _matches_cache
 
     date_from = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     date_to = (datetime.now(timezone.utc) + timedelta(days=days_ahead)).strftime("%Y-%m-%d")

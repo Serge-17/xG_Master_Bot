@@ -9,6 +9,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -75,6 +76,59 @@ async def search_sports_ru_match(home: str, away: str) -> Optional[str]:
             if "sports.ru/football/match/" in href:
                 return href if "/odds/" in href else href.rstrip("/") + "/odds/"
     return None
+
+
+def _parse_schedule_datetime(time_text: str) -> Optional[datetime]:
+    m = re.match(r"^(\d{2}):(\d{2})$", _norm(time_text))
+    if not m:
+        return None
+    now = datetime.now(timezone.utc)
+    return now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+
+
+async def scrape_sports_ru_matches() -> list[dict]:
+    text = await _fetch_text("https://www.sports.ru/football/match/")
+    if not text:
+        return []
+
+    soup = BeautifulSoup(text, "html.parser")
+    raw_lines = [_norm(line) for line in soup.get_text("\n").splitlines()]
+    lines = [line for line in raw_lines if line]
+    matches: list[dict] = []
+    current_league = ""
+
+    league_re = re.compile(r"^[^\d|]{3,}\d{4}/\d{4}(?:\s*\(\d+\))?$")
+    row_re = re.compile(r"^\d{2}:\d{2}\s*\|")
+
+    for line in lines:
+        if league_re.match(line):
+            current_league = line
+            continue
+        if not current_league or not row_re.match(line):
+            continue
+
+        parts = [_norm(part) for part in line.split("|")]
+        if len(parts) < 5:
+            continue
+
+        kickoff = _parse_schedule_datetime(parts[0])
+        status = parts[1].lower()
+        home = parts[2]
+        away = parts[4]
+        if not home or not away:
+            continue
+        if any(flag in status for flag in ["заверш", "отмен", "перенес"]):
+            continue
+
+        matches.append({
+            "home": home,
+            "away": away,
+            "competition": current_league,
+            "utc_date": kickoff,
+            "status": parts[1],
+        })
+
+    return matches
 
 
 def _extract_decimal_odds(text: str) -> list[float]:

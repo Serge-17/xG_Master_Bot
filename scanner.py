@@ -60,7 +60,7 @@ def _context_to_text(cached) -> str:
     return "\n".join(parts)
 
 
-async def _prepare_match_cache(match: Match) -> tuple[Optional[Odds], object]:
+async def _prepare_match_cache(match: Match, include_forms: bool = True) -> tuple[Optional[Odds], object]:
     match_key = _match_key(match)
     cached_match = await get_cached_match(match_key)
     snapshot = await get_latest_odds_snapshot(match_key, max_age_hours=8)
@@ -99,10 +99,14 @@ async def _prepare_match_cache(match: Match) -> tuple[Optional[Odds], object]:
             live_odds = api_odds
             source = "odds-api"
 
-    home_form, away_form = await asyncio.gather(
-        fetch_team_form(match.home),
-        fetch_team_form(match.away),
-    )
+    if include_forms:
+        home_form, away_form = await asyncio.gather(
+            fetch_team_form(match.home),
+            fetch_team_form(match.away),
+        )
+    else:
+        home_form = None
+        away_form = None
 
     if live_odds:
         await save_odds_snapshot(
@@ -133,10 +137,10 @@ async def _prepare_match_cache(match: Match) -> tuple[Optional[Odds], object]:
         facts=facts,
         stats=stats,
         injuries=injuries,
-        home_form=home_form.form,
-        away_form=away_form.form,
-        home_summary=home_form.summary(),
-        away_summary=away_form.summary(),
+        home_form=home_form.form if home_form else getattr(cached_match, "home_form", "— — — — —"),
+        away_form=away_form.form if away_form else getattr(cached_match, "away_form", "— — — — —"),
+        home_summary=home_form.summary() if home_form else getattr(cached_match, "home_summary", ""),
+        away_summary=away_form.summary() if away_form else getattr(cached_match, "away_summary", ""),
         raw_payload={
             "bookmaker": live_odds.bookmaker if live_odds else "",
             "odds": {
@@ -156,7 +160,7 @@ async def warmup_match_cache(limit: int = 24) -> int:
     count = 0
     for match in matches[:limit]:
         try:
-            odds, _ = await _prepare_match_cache(match)
+            odds, _ = await _prepare_match_cache(match, include_forms=False)
             if odds and odds.has_1x2():
                 count += 1
             await asyncio.sleep(0.5)
