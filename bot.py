@@ -8,7 +8,22 @@ import asyncio
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+
+# Все матчи отображаем по Москве (UTC+3) — для русскоязычной аудитории
+MSK_TZ = timezone(timedelta(hours=3))
+
+
+def _fmt_msk(dt, with_date: bool = False) -> str:
+    """utc datetime → строка в МСК. Принимает naive (трактуем как UTC)
+    и aware datetime."""
+    if dt is None:
+        return "—:—"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    msk = dt.astimezone(MSK_TZ)
+    return msk.strftime("%d.%m %H:%M МСК") if with_date else msk.strftime("%H:%M МСК")
 
 from telegram import (
     InlineKeyboardButton,
@@ -119,10 +134,17 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await ensure_user(user.id, user.username or "", user.first_name or "")
     await update.message.reply_text(
         "⚽ <b>xG Master Bot</b>\n\n"
-        "Ищу перспективные ставки по топ-лигам. Считаю вероятности по модели Пуассона и Келли, "
-        "подтягиваю форму, новости и веб-контекст по матчам.\n\n"
+        "Я считаю value-ставки по топ-лигам. В основе — Пуассон с Dixon-Coles "
+        "поправкой, форма команд и медиана букмекерских коэфов. Когда "
+        "линия букмекера расходится с моей оценкой — ловлю расхождение "
+        "и считаю размер ставки по Kelly.\n\n"
+        "Что умею:\n"
+        "• 📅 показать матчи дня с коэфами\n"
+        "• 🔮 выкатить прогнозы с пояснением «почему беру»\n"
+        "• 📤 принять скриншот чека и сам обновить банк\n"
+        "• 📊 вести статистику с ROI и винрейтом\n\n"
         f"{DISCLAIMER}\n\n"
-        "Выбери действие:",
+        "С чего начнём?",
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu(),
     )
@@ -130,12 +152,13 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Команды:\n"
+        "<b>Что я понимаю:</b>\n"
         "/start — главное меню\n"
-        "/setbank 5000 — установить банк\n"
-        "/scan — сканировать матчи прямо сейчас\n"
-        "/stats — быстрая статистика\n"
-        "/find <команда> — поиск сигнала по названию команды\n",
+        "/setbank 5000 — закрепить банк (без него Kelly считать не от чего)\n"
+        "/scan — прогнать матчи прямо сейчас\n"
+        "/stats — твоя статистика: винрейт, ROI, прибыль\n"
+        "/find Реал — поиск сигнала по команде\n",
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -150,7 +173,8 @@ async def cmd_setbank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await set_bank(user.id, amount)
     await update.message.reply_text(
-        f"✅ Банк установлен: <b>{amount:,.0f} ₽</b>",
+        f"✅ Банк закреплён: <b>{amount:,.0f} ₽</b>\n"
+        f"<i>Размер ставок Kelly теперь считаю от этой суммы.</i>",
         parse_mode=ParseMode.HTML,
     )
 
@@ -165,7 +189,7 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await ensure_user(user_id, update.effective_user.username or "",
                       update.effective_user.first_name or "")
-    await ctx.bot.send_message(chat_id, "🔍 Сканирую матчи, ищу интересные варианты для ставки...")
+    await ctx.bot.send_message(chat_id, "🔍 Прогоняю матчи через модель — секунду.")
     try:
         bank = await get_bank(user_id) or 10000.0
         published = await scan_and_publish(ctx.bot, bank)
@@ -173,25 +197,31 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await _send_personal_signals(ctx, chat_id, user_id)
         else:
             await ctx.bot.send_message(
-                chat_id, f"✅ Опубликовано сигналов в канал: {published}",
+                chat_id,
+                f"✅ В канал ушло прогнозов: <b>{published}</b>",
+                parse_mode=ParseMode.HTML,
                 reply_markup=main_menu(),
             )
     except Exception as e:
         log.exception("scan failed")
-        await ctx.bot.send_message(chat_id, f"❌ Ошибка сканирования: {e}")
+        await ctx.bot.send_message(chat_id, f"❌ Скан упал: {e}")
 
 
 async def cmd_find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = " ".join(ctx.args or []).strip()
     if not query:
-        await update.message.reply_text("Использование: /find Real Madrid")
+        await update.message.reply_text("Использование: <code>/find Реал</code>",
+                                        parse_mode=ParseMode.HTML)
         return
     sigs = await find_signal_by_match(query)
     if not sigs:
-        await update.message.reply_text("Ничего не нашёл.")
+        await update.message.reply_text(
+            f"По «{query}» в моей базе сигналов нет. "
+            f"Возможно, матч ещё не разбирал — попробуй позже или /scan."
+        )
         return
     await update.message.reply_text(
-        _signals_list_text(sigs, title=f"🔍 Найдено по «{query}»"),
+        _signals_list_text(sigs, title=f"🔍 По запросу «{query}»"),
         parse_mode=ParseMode.HTML,
     )
 
@@ -207,7 +237,7 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ── Назад в меню
     if data == "back_menu":
         await q.message.edit_text(
-            "⚽ <b>xG Master Bot</b>\n\nВыбери действие:",
+            "⚽ <b>xG Master Bot</b>\n\nС чего продолжаем?",
             parse_mode=ParseMode.HTML, reply_markup=main_menu(),
         )
         return
@@ -219,13 +249,14 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         amount = float(data.split("_", 1)[1])
         await set_bank(user.id, amount)
         await q.message.edit_text(
-            f"✅ Банк установлен: <b>{amount:,.0f} ₽</b>",
+            f"✅ Банк закреплён: <b>{amount:,.0f} ₽</b>\n"
+            f"<i>Размер ставок Kelly теперь считаю от этой суммы.</i>",
             parse_mode=ParseMode.HTML, reply_markup=back_button(),
         ); return
     if data == "bank_custom":
         ctx.user_data["awaiting_bank"] = True
         await q.message.edit_text(
-            "✏️ Пришли сумму банка числом (например: 7500)",
+            "✏️ Пришли сумму банка числом (например: 7500).",
             reply_markup=back_button(),
         ); return
 
@@ -240,8 +271,8 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "menu_upload":
         ctx.user_data["awaiting_receipt"] = True
         await q.message.reply_text(
-            "📸 Пришли скриншот чека ставки — AI прочитает результат и "
-            "обновит банк автоматически."
+            "📸 Кидай скриншот чека — AI прочитает сумму, коэф и статус, "
+            "сам обновлю банк и добавлю ставку в историю."
         ); return
 
     # ── Настройки
@@ -284,16 +315,18 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sig_id = int(data.rsplit("_", 1)[1])
         sig = await get_signal(sig_id)
         if not sig:
-            await q.message.reply_text("Сигнал не найден."); return
+            await q.message.reply_text("Этого сигнала уже нет в базе."); return
         if data.startswith("sig_odds_"):
+            market_prob = 1 / sig.book_odds if sig.book_odds > 1 else 0.0
+            gap = (sig.probability - market_prob) * 100
             body = (
                 f"📊 <b>Коэффициенты — {sig.match}</b>\n\n"
-                f"Рынок ставки: {sig.market}\n"
-                f"Выбор: {sig.pick}\n"
-                f"Коэффициент букмекера: <b>{sig.book_odds:.2f}</b>\n"
-                f"Справедливый коэффициент по модели: <b>{sig.fair_odds:.2f}</b>\n"
-                f"Вероятность по модели: <b>{sig.probability*100:.1f}%</b>\n"
-                f"Преимущество над линией: <b>{sig.edge*100:+.1f}%</b>"
+                f"Рынок: {sig.market}\n"
+                f"Ставка: <b>{sig.pick}</b>\n"
+                f"💰 Букмекер: <b>{sig.book_odds:.2f}</b>  ·  "
+                f"🧮 Моя цена: <b>{sig.fair_odds:.2f}</b>\n"
+                f"📈 рынок {market_prob*100:.0f}%, моя оценка {sig.probability*100:.0f}% "
+                f"({gap:+.1f} п.п.)"
             )
         else:
             cached = None
@@ -301,14 +334,14 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 match_key = f"{sig.kickoff.strftime('%Y%m%d%H%M')}:{sig.match.split(' vs ')[0].lower()}:{sig.match.split(' vs ')[-1].lower()}:"
                 cached = await get_cached_match(match_key)
             body = (
-                f"🧠 <b>Анализ — {sig.match}</b>\n\n"
-                f"Рекомендуемая ставка: <b>{sig.pick}</b>\n"
-                f"Рекомендуемый размер ставки: {sig.recommended_stake:.0f} ₽\n\n"
-                f"<b>Почему ставка выглядит интересной:</b>\n{sig.reasoning or '—'}\n\n"
-                f"<b>Риски:</b> {sig.risks or '—'}\n\n"
-                f"🏠 Форма хозяев: <code>{form_ru(sig.home_form or '— — — — —')}</code>\n"
-                f"✈️ Форма гостей: <code>{form_ru(sig.away_form or '— — — — —')}</code>\n\n"
-                f"🩺 Травмы/новости: {_render_cached_list(getattr(cached, 'injuries', '[]'), 2)}\n"
+                f"🧠 <b>Разбор — {sig.match}</b>\n\n"
+                f"📌 <b>Беру:</b> {sig.pick}\n"
+                f"💵 <b>Размер ставки:</b> {sig.recommended_stake:.0f} ₽\n\n"
+                f"<b>Почему беру:</b>\n{sig.reasoning or '—'}\n\n"
+                f"<b>Что смущает:</b> {sig.risks or '—'}\n\n"
+                f"🏠 Хозяева: <code>{form_ru(sig.home_form or '— — — — —')}</code>  "
+                f"·  ✈️ Гости: <code>{form_ru(sig.away_form or '— — — — —')}</code>\n\n"
+                f"🩺 Кадры: {_render_cached_list(getattr(cached, 'injuries', '[]'), 2)}\n"
                 f"📌 Факты: {_render_cached_list(getattr(cached, 'facts', '[]'), 3)}\n"
                 f"📊 Статистика: {_render_cached_list(getattr(cached, 'stats', '[]'), 3)}"
             )
@@ -317,10 +350,13 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── Матчи дня (красивое форматирование) ─────────────────────────
 async def _show_matches_day(q):
-    await q.message.edit_text("⏳ Загружаю расписание...", reply_markup=back_button())
+    await q.message.edit_text("⏳ Подтягиваю линию...", reply_markup=back_button())
     matches = await _matches_for_today_view()
     if not matches:
-        await q.message.edit_text("📭 На сегодня матчей не найдено.", reply_markup=back_button())
+        await q.message.edit_text(
+            "📭 На сегодня тишина — расписание пустое или буки ещё не выкатили линию.",
+            reply_markup=back_button(),
+        )
         return
 
     by_league: dict[str, list] = {}
@@ -328,7 +364,7 @@ async def _show_matches_day(q):
         league = getattr(m, "league", "") or getattr(m, "competition", "") or "—"
         by_league.setdefault(league, []).append(m)
 
-    lines = ["📅 <b>Матчи сегодня</b>\n"]
+    lines = ["📅 <b>Что играем сегодня</b>\n"]
     for league, ms in list(by_league.items())[:8]:
         emoji = league_emoji(league)
         lines.append(f"\n{emoji} <b>{league_title_ru(league)}</b>")
@@ -336,10 +372,10 @@ async def _show_matches_day(q):
         for m in ms[:5]:
             lines.append(_render_match_card(m))
         if len(ms) > 5:
-            lines.append(f"   <i>...ещё {len(ms)-5} матчей</i>")
+            lines.append(f"   <i>...и ещё {len(ms)-5} матчей в этой лиге</i>")
 
-    lines.append(f"\n<i>Всего матчей: {len(matches)}</i>")
-    lines.append("\n💡 <i>Нажми /scan для подробного анализа ставок</i>")
+    lines.append(f"\n<i>Всего на тарелке: {len(matches)} матчей.</i>")
+    lines.append("💡 <i>/scan — прогнать через модель и достать value.</i>")
 
     await q.message.edit_text(
         "\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=back_button()
@@ -348,20 +384,20 @@ async def _show_matches_day(q):
 
 # ── Прогнозы ────────────────────────────────────────────────────
 async def _show_signals(q, user_id: int):
-    await q.message.edit_text("⏳ Ищу прогнозы...", reply_markup=back_button())
+    await q.message.edit_text("⏳ Достаю свежие прогнозы...", reply_markup=back_button())
 
     sigs = await list_todays_signals()
     if not sigs:
         sigs = await list_signals(limit=8)
 
     if sigs:
-        body = _signals_list_text(sigs, title="🔮 Прогнозы")
+        body = _signals_list_text(sigs, title="🔮 Что взял в работу")
         await q.message.edit_text(body, parse_mode=ParseMode.HTML, reply_markup=back_button())
         return
 
     # Прогнозов нет — запускаем быстрый анализ
     await q.message.edit_text(
-        "🔍 Прогнозов ещё нет. Запускаю быстрый анализ матчей...",
+        "🔍 Готовых прогнозов нет. Прохожусь по линии прямо сейчас...",
         reply_markup=back_button()
     )
     from scanner import scan_best_guesses
@@ -370,8 +406,9 @@ async def _show_signals(q, user_id: int):
 
     if not guesses:
         await q.message.edit_text(
-            "😐 Сегодня нет матчей с заметным преимуществом по линии.\n"
-            "Попробуй позже или запусти /scan вручную.",
+            "😐 Сегодня линия плотная — заметного перевеса не вижу. "
+            "Бывает, и это нормально: лучше пропустить день, чем ставить на минимальном edge.\n\n"
+            "Загляни попозже или запусти /scan.",
             reply_markup=back_button()
         )
         return
@@ -381,7 +418,7 @@ async def _show_signals(q, user_id: int):
         m = g["match"]
         p = g["pick"]
         emoji = league_emoji(m.competition)
-        ts = m.utc_date.strftime("%H:%M UTC") if m.utc_date else ""
+        ts = _fmt_msk(m.utc_date)
         market_prob = p.market_probability if p.market_probability > 0 \
             else (1 / p.book_odds if p.book_odds > 1 else 0.0)
         gap = (p.probability - market_prob) * 100
@@ -403,10 +440,13 @@ async def _show_signals(q, user_id: int):
 
 # ── Найти матч → Показать лиги ────────────────────────────────────
 async def _show_leagues(q, ctx):
-    await q.message.edit_text("⏳ Загружаю лиги...", reply_markup=back_button())
+    await q.message.edit_text("⏳ Подтягиваю лиги...", reply_markup=back_button())
     matches = await fetch_matches()
     if not matches:
-        await q.message.edit_text("📭 Матчей не найдено.", reply_markup=back_button())
+        await q.message.edit_text(
+            "📭 Расписание пустое — матчей сегодня не вижу.",
+            reply_markup=back_button(),
+        )
         return
 
     # Группируем по лиге
@@ -429,8 +469,8 @@ async def _show_leagues(q, ctx):
 
     await q.message.edit_text(
         "🔍 <b>Выбери лигу:</b>\n\n"
-        "<i>Нажми на лигу — увидишь матчи дня.\n"
-        "Нажми на матч — получишь прогноз ставки.</i>",
+        "<i>Тыкни лигу → увидишь матчи дня. Тыкни матч → прогоню через модель "
+        "и скажу, есть ли там value.</i>",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(rows)
     )
@@ -442,7 +482,10 @@ async def _show_league_matches(q, ctx, league_idx: int):
     all_matches = ctx.bot_data.get("search_matches", [])
 
     if not leagues or league_idx >= len(leagues):
-        await q.message.edit_text("⚠️ Данные устарели. Попробуй снова.", reply_markup=back_button())
+        await q.message.edit_text(
+            "⚠️ Список лиг устарел — открой «Найти матч» заново.",
+            reply_markup=back_button(),
+        )
         return
 
     league = leagues[league_idx]
@@ -455,7 +498,7 @@ async def _show_league_matches(q, ctx, league_idx: int):
     emoji = league_emoji(league)
     rows = []
     for i, m in enumerate(matches[:10]):
-        ts = m.utc_date.strftime("%H:%M") if m.utc_date else "--:--"
+        ts = _fmt_msk(m.utc_date).split(" ")[0] if m.utc_date else "--:--"
         rows.append([InlineKeyboardButton(
             f"🕐{ts} · {m.home} 🆚 {m.away}",
             callback_data=f"matchpick_{i}"
@@ -479,18 +522,21 @@ async def _analyze_match(q, ctx, user_id: int):
 
     matches = ctx.bot_data.get("current_league_matches", [])
     if not matches or idx >= len(matches):
-        await q.message.edit_text("⚠️ Данные устарели. Попробуй снова.", reply_markup=back_button())
+        await q.message.edit_text(
+            "⚠️ Список матчей устарел — открой лигу заново.",
+            reply_markup=back_button(),
+        )
         return
 
     match = matches[idx]
-    ts = match.utc_date.strftime("%d.%m %H:%M UTC") if match.utc_date else ""
+    ts = _fmt_msk(match.utc_date, with_date=True) if match.utc_date else ""
     emoji = league_emoji(match.competition)
 
     await q.message.edit_text(
         f"{emoji} <b>{league_title_ru(match.competition)}</b>\n"
         f"⚽ <b>{match.home} — {match.away}</b>\n"
         f"🕐 {ts}\n\n"
-        "⏳ Анализирую матч...",
+        "⏳ Прогоняю через модель...",
         parse_mode=ParseMode.HTML,
         reply_markup=back_button()
     )
@@ -597,7 +643,7 @@ async def _analyze_match(q, ctx, user_id: int):
     except Exception as e:
         log.exception("analyze_match failed")
         await q.message.edit_text(
-            f"❌ Ошибка анализа: {e}",
+            f"❌ Что-то пошло не так при анализе: {e}",
             reply_markup=back_button("menu_search")
         )
 
@@ -606,16 +652,24 @@ async def _analyze_match(q, ctx, user_id: int):
 async def _show_retro(q, user_id: int):
     bets = await retro_report(user_id, limit=15)
     if not bets:
-        body = "📖 История пуста. После закрытия ставок здесь появится отчёт."
+        body = (
+            "📖 <b>История пока пустая</b>\n\n"
+            "Когда закроешь первую ставку (через 📤 «Загрузить чек» или вручную) — "
+            "здесь появится разбор: что сыграло, что нет, какой ROI."
+        )
     else:
-        lines = ["📖 <b>Ретро-отчёт — последние закрытые ставки:</b>\n"]
+        lines = ["📖 <b>Последние закрытые ставки</b>\n"]
+        total_profit = 0.0
         for b in bets:
             icon = {"win": "✅", "loss": "❌", "void": "↩️"}.get(b.status, "•")
             profit = f"{b.profit:+.0f} ₽" if b.profit else "0 ₽"
+            total_profit += float(b.profit or 0)
             lines.append(
-                f"{icon} <b>{b.match or '—'}</b>  @ {b.odds:.2f}  |  "
+                f"{icon} <b>{b.match or '—'}</b>  @ {b.odds:.2f}  ·  "
                 f"ставка {b.stake:.0f} ₽  →  {profit}"
             )
+        sign = "📈" if total_profit >= 0 else "📉"
+        lines.append(f"\n{sign} <b>Итого по этим ставкам: {total_profit:+.0f} ₽</b>")
         body = "\n".join(lines)
     await q.message.edit_text(body, parse_mode=ParseMode.HTML, reply_markup=back_button())
 
@@ -630,16 +684,21 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             amount = float(text.replace(" ", "").replace(",", "."))
             assert amount >= 0
         except Exception:
-            await update.message.reply_text("Не понял число. Попробуй ещё раз через кнопку 💰 Мой банк.")
+            await update.message.reply_text(
+                "Не разобрал сумму. Зайди ещё раз через 💰 Мой банк и пришли цифру (например 7500).",
+            )
             return
         await set_bank(user.id, amount)
         await update.message.reply_text(
-            f"✅ Банк установлен: <b>{amount:,.0f} ₽</b>",
+            f"✅ Банк закреплён: <b>{amount:,.0f} ₽</b>",
             parse_mode=ParseMode.HTML, reply_markup=main_menu(),
         )
         return
 
-    await update.message.reply_text("Открой меню:", reply_markup=main_menu())
+    await update.message.reply_text(
+        "Жми кнопки в меню — там всё, что я умею.",
+        reply_markup=main_menu(),
+    )
 
 
 # ── Фото — OCR чека ──────────────────────────────────────────────
@@ -649,16 +708,17 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not ctx.user_data.pop("awaiting_receipt", False):
         await update.message.reply_text(
-            "📸 Это чек? Нажми 📤 <b>Загрузить чек</b> в меню, потом пришли фото.",
+            "📸 Если это чек — сначала жми 📤 <b>Загрузить чек</b> в меню, "
+            "потом пришли фото. Так я пойму, что от меня ждут.",
             parse_mode=ParseMode.HTML, reply_markup=main_menu(),
         )
         return
 
     if not update.message.photo:
-        await update.message.reply_text("Не вижу фото. Пришли именно скриншот чека.")
+        await update.message.reply_text("Не вижу фото — пришли именно скриншот чека.")
         return
 
-    await update.message.reply_text("🔍 Читаю скриншот через AI...")
+    await update.message.reply_text("🔍 Читаю чек...")
 
     photo = update.message.photo[-1]
     tg_file = await ctx.bot.get_file(photo.file_id)
@@ -667,8 +727,8 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     result = await parse_receipt(image_bytes)
     if not result or result["stake"] <= 0 or result["odds"] <= 1:
         await update.message.reply_text(
-            "❌ Не смог распознать чек.\n"
-            "Попробуй более чёткое фото: видны сумма, коэффициент, статус.",
+            "❌ Не разобрал чек. Нужно чтобы на фото были видны сумма ставки, "
+            "коэффициент и статус (выигрыш/проигрыш). Пришли ещё раз почётче.",
             reply_markup=main_menu(),
         )
         return
@@ -684,15 +744,15 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     bet = await close_bet(bet_id, status)
     if bet is None:
-        await update.message.reply_text("❌ Не смог сохранить ставку.")
+        await update.message.reply_text("❌ Не смог сохранить ставку — попробуй ещё раз.")
         return
 
-    icon = {"win": "✅ Победа!", "loss": "❌ Проигрыш", "void": "↩️ Возврат"}[status]
+    icon = {"win": "✅ Зашло!", "loss": "❌ Не зашло", "void": "↩️ Возврат"}[status]
     profit_str = f"{bet.profit:+.0f} ₽" if bet.profit else "0 ₽"
     await update.message.reply_text(
         f"{icon}\n\n"
         f"🏆 {match_name}\n"
-        f"📊 Коэф: {odds:.2f}  |  Ставка: {stake:.0f} ₽\n"
+        f"📊 Коэф {odds:.2f}  ·  ставка {stake:.0f} ₽\n"
         f"💵 Результат: <b>{profit_str}</b>\n"
         f"💰 Банк: {bet.bank_before:.0f} ₽ → <b>{bet.bank_after:.0f} ₽</b>",
         parse_mode=ParseMode.HTML, reply_markup=main_menu(),
@@ -702,10 +762,16 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── Helpers ──────────────────────────────────────────────────────
 def _stats_text(s: dict) -> str:
     sign = "📈" if s["roi"] >= 0 else "📉"
+    if s["total"] == 0:
+        return (
+            "📊 <b>Статистика пустая</b>\n\n"
+            "Сделай первую ставку или загрузи скриншот чека — посчитаю "
+            "винрейт, ROI и прибыль на длинной."
+        )
     return (
-        "📊 <b>Статистика ставок</b>\n\n"
-        f"Всего: <b>{s['total']}</b>  "
-        f"(✅ {s['wins']} / ❌ {s['losses']} / ↩️ {s['voids']})\n"
+        "📊 <b>Как идут дела</b>\n\n"
+        f"Сыграно: <b>{s['total']}</b>  "
+        f"(✅ {s['wins']} · ❌ {s['losses']} · ↩️ {s['voids']})\n"
         f"🏆 Винрейт: <b>{s['win_rate']}%</b>\n"
         f"{sign} ROI: <b>{s['roi']}%</b>\n"
         f"💵 Прибыль: <b>{s['profit']:+.2f} ₽</b>\n"
@@ -719,13 +785,13 @@ def _signals_list_text(sigs: list, title: str = "🔮 Прогнозы") -> str:
     lines = [f"<b>{title}</b>\n"]
     for s in sigs:
         icon = {"win": "✅", "loss": "❌", "void": "↩️", "pending": "🔵"}.get(s.status, "🔵")
-        ko = s.kickoff.strftime("%d.%m %H:%M") if s.kickoff else "—"
+        ko = _fmt_msk(s.kickoff, with_date=True) if s.kickoff else "—"
         emoji = league_emoji(s.league or "")
         lines.append(
             f"{icon} {emoji} <b>{s.match}</b>\n"
-            f"   Лига: {league_title_ru(s.league or '')}\n"
-            f"   Ставка: {s.pick}\n"
-            f"   Коэффициент: <b>{s.book_odds:.2f}</b> | Вероятность: {int(s.probability*100)}% | Время: {ko}\n"
+            f"   <i>{league_title_ru(s.league or '')}</i>\n"
+            f"   📌 {s.pick}  @  <b>{s.book_odds:.2f}</b>\n"
+            f"   📈 {int(s.probability*100)}%  ·  🕐 {ko}\n"
         )
     return "\n".join(lines)
 
@@ -755,10 +821,10 @@ def _cached_match_context(cached) -> str:
 
 def _render_match_card(item) -> str:
     kickoff_dt = getattr(item, "kickoff", None) or getattr(item, "utc_date", None)
-    kickoff = kickoff_dt.strftime("%H:%M") if kickoff_dt else "--:--"
+    kickoff = _fmt_msk(kickoff_dt) if kickoff_dt else "--:--"
     lines = [
-        f"🕐 <b>{kickoff} UTC</b>",
-        f"   {item.home} 🆚 {item.away}",
+        f"🕐 <b>{kickoff}</b>",
+        f"   {item.home} — {item.away}",
     ]
     raw = getattr(item, "raw_payload", "{}") or "{}"
     try:
@@ -796,9 +862,15 @@ async def _show_bank(q, user_id: int):
         [InlineKeyboardButton("✏️ Своя сумма", callback_data="bank_custom")],
         [InlineKeyboardButton("◀ В меню", callback_data="back_menu")],
     ]
+    bank_line = (
+        f"💰 <b>Банк сейчас: {bank:,.0f} ₽</b>"
+        if bank > 0 else
+        "💰 <b>Банк не задан</b>"
+    )
     await q.message.edit_text(
-        f"💰 <b>Мой банк: {bank:,.0f} ₽</b>\n\n"
-        "Выбери пресет или /setbank &lt;сумма&gt;",
+        f"{bank_line}\n\n"
+        "От этой суммы я считаю размер каждой ставки по Kelly. "
+        "Выбери пресет или укажи свою сумму — а лучше реальный игровой банк.",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(rows),
     )
@@ -809,10 +881,11 @@ async def _show_settings(q, user_id: int):
     risk = st.get("risk", "mid")
     kelly = st.get("kelly_cap", config.kelly_cap)
     desc = {
-        "low":  "Консервативно — ставишь до 2% банка. Медленный рост, минимальный риск.",
-        "mid":  "Средне — до 5% банка. Баланс между ростом и риском.",
-        "high": "Агрессивно — до 8% банка. Высокий потенциал и высокий риск.",
+        "low":  "До 2% банка на ставку. Растёшь медленно, но и просадка короткая.",
+        "mid":  "До 5% банка. Стандартный Kelly — золотая середина.",
+        "high": "До 8% банка. Агрессивно: больше профита на длинной — и больнее на минус-серии.",
     }
+    risk_label = {"low": "консервативный", "mid": "средний", "high": "агрессивный"}[risk]
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(
             ("✅ " if risk == "low" else "") + "Консервативно (2%)", callback_data="risk_low")],
@@ -823,14 +896,11 @@ async def _show_settings(q, user_id: int):
         [InlineKeyboardButton("◀ В меню", callback_data="back_menu")],
     ])
     await q.message.edit_text(
-        "⚙️ <b>Настройки риск-менеджмента</b>\n\n"
-        f"Текущий профиль: <b>{risk}</b>\n"
-        f"Лимит ставки: до <b>{kelly*100:.0f}%</b> от банка\n\n"
+        "⚙️ <b>Риск-профиль</b>\n\n"
+        f"Сейчас: <b>{risk_label}</b>  ·  потолок ставки <b>{kelly*100:.0f}%</b> от банка\n\n"
         f"<i>{desc[risk]}</i>\n\n"
-        "Выбери профиль риска:\n"
-        "• <b>Консервативно</b> — для новичков и осторожных\n"
-        "• <b>Средне</b> — стандартный Kelly\n"
-        "• <b>Агрессивно</b> — опытные игроки\n\n"
+        "Чем выше потолок — тем сильнее раскачка. Если просадки тяжело "
+        "переносить психологически, лучше консервативный профиль.\n\n"
         f"{DISCLAIMER}",
         parse_mode=ParseMode.HTML, reply_markup=kb,
     )
@@ -844,7 +914,8 @@ async def _send_personal_signals(ctx, chat_id: int, user_id: int):
     if not guesses:
         await ctx.bot.send_message(
             chat_id,
-            "😐 Подходящих ставок сегодня не нашёл. Попробуй позже.",
+            "😐 Сегодня линия плотная — value не вижу. Это нормально: "
+            "лучше пропустить день, чем ставить на минимальном edge.",
             reply_markup=main_menu(),
         )
         return
@@ -853,7 +924,7 @@ async def _send_personal_signals(ctx, chat_id: int, user_id: int):
         m = g["match"]
         p = g["pick"]
         emoji = league_emoji(m.competition)
-        ts = m.utc_date.strftime("%H:%M UTC") if m.utc_date else ""
+        ts = _fmt_msk(m.utc_date) if m.utc_date else ""
         market_prob = p.market_probability if p.market_probability > 0 \
             else (1 / p.book_odds if p.book_odds > 1 else 0.0)
         gap = (p.probability - market_prob) * 100

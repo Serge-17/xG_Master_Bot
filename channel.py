@@ -8,7 +8,11 @@ channel.py — публикация прогнозов в Telegram-канал.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+
+# Время матчей показываем по Москве (UTC+3)
+MSK_TZ = timezone(timedelta(hours=3))
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -81,8 +85,10 @@ def _gap_phrase(model_prob: float, market_prob: float) -> str:
 def _kickoff_local(match: Match) -> str:
     if match.utc_date is None:
         return "время уточняется"
-    dt = match.utc_date.astimezone(timezone.utc)
-    return dt.strftime("%d.%m %H:%M UTC")
+    dt = match.utc_date
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(MSK_TZ).strftime("%d.%m %H:%M МСК")
 
 
 def _league_ru(name: str) -> str:
@@ -141,7 +147,13 @@ def channel_post_keyboard(signal_id: int) -> InlineKeyboardMarkup:
 def format_matches_digest(items: list) -> str:
     lines = ["📅 <b>Что играем сегодня</b>\n"]
     for item in items[:12]:
-        kickoff = item.kickoff.strftime("%H:%M") if getattr(item, "kickoff", None) else "—:—"
+        ko_dt = getattr(item, "kickoff", None)
+        if ko_dt is not None:
+            if ko_dt.tzinfo is None:
+                ko_dt = ko_dt.replace(tzinfo=timezone.utc)
+            kickoff = ko_dt.astimezone(MSK_TZ).strftime("%H:%M")
+        else:
+            kickoff = "—:—"
         league = _league_ru(getattr(item, "league", "") or getattr(item, "competition", "") or "—")
         payload = {}
         raw = getattr(item, "raw_payload", "{}") or "{}"
@@ -159,7 +171,7 @@ def format_matches_digest(items: list) -> str:
             )
         lines.append(
             f"• <b>{item.home} — {item.away}</b>\n"
-            f"{kickoff} UTC • <i>{league}</i>{odds_line}"
+            f"{kickoff} МСК • <i>{league}</i>{odds_line}"
         )
     lines.append(
         "\n<i>Линию обновляю несколько раз в день. К старту матча цифры могут поехать.</i>"
