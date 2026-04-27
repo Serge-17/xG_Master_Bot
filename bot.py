@@ -528,21 +528,24 @@ async def _send_personal_signals(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, u
 # ────────────────────────────────────────────────────────────────
 # Регистрация хендлеров
 # ────────────────────────────────────────────────────────────────
-def build_application(token: str) -> Application:
-    # Щадящие таймауты на случай медленного cold start HF Space.
-    # IPv4-only форс живёт в webapp.py через monkey-patch socket.getaddrinfo.
-    app = (
-        Application.builder()
-        .token(token)
-        .connect_timeout(30.0)
-        .read_timeout(30.0)
-        .write_timeout(30.0)
-        .pool_timeout(30.0)
-        .get_updates_connect_timeout(30.0)
-        .get_updates_read_timeout(35.0)
-        .build()
-    )
+def build_application(token: str, proxy: str = "") -> Application:
+    builder = Application.builder().token(token)
 
+    if proxy:
+        from telegram.request import HTTPXRequest
+        req = HTTPXRequest(proxy=proxy, connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0, pool_timeout=30.0)
+        upd = HTTPXRequest(proxy=proxy, connect_timeout=30.0, read_timeout=35.0)
+        builder = builder.request(req).get_updates_request(upd)
+    else:
+        builder = (builder
+            .connect_timeout(30.0)
+            .read_timeout(30.0)
+            .write_timeout(30.0)
+            .pool_timeout(30.0)
+            .get_updates_connect_timeout(30.0)
+            .get_updates_read_timeout(35.0))
+
+    app = builder.build()
     app.add_handler(CommandHandler("start",   cmd_start))
     app.add_handler(CommandHandler("help",    cmd_help))
     app.add_handler(CommandHandler("menu",    cmd_start))
@@ -550,9 +553,7 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("stats",   cmd_stats))
     app.add_handler(CommandHandler("scan",    cmd_scan))
     app.add_handler(CommandHandler("find",    cmd_find))
-
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
     return app
