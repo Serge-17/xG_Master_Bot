@@ -532,18 +532,20 @@ def build_application(token: str, proxy: str = "") -> Application:
     builder = Application.builder().token(token)
 
     if proxy:
-        from telegram.request import HTTPXRequest
-        req = HTTPXRequest(proxy=proxy, connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0, pool_timeout=30.0)
-        upd = HTTPXRequest(proxy=proxy, connect_timeout=30.0, read_timeout=35.0)
-        builder = builder.request(req).get_updates_request(upd)
-    else:
+        # Cloudflare Worker — reverse proxy, используем base_url
+        base_url = proxy.rstrip("/") + "/bot"
+        base_file_url = proxy.rstrip("/") + "/file/bot"
         builder = (builder
-            .connect_timeout(30.0)
-            .read_timeout(30.0)
-            .write_timeout(30.0)
-            .pool_timeout(30.0)
-            .get_updates_connect_timeout(30.0)
-            .get_updates_read_timeout(35.0))
+            .base_url(base_url)
+            .base_file_url(base_file_url))
+
+    builder = (builder
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
+        .write_timeout(30.0)
+        .pool_timeout(30.0)
+        .get_updates_connect_timeout(30.0)
+        .get_updates_read_timeout(35.0))
 
     app = builder.build()
     app.add_handler(CommandHandler("start",   cmd_start))
