@@ -67,14 +67,15 @@ async def _init_bot():
         from db import init_db
         await init_db()
         log.info("DB готова")
+    except Exception as e:
+        log.error("init_db: %s", e)
 
+    # Прогрев кэша коэффициентов
     try:
         from data_sources import warm_odds_cache
         await warm_odds_cache()
     except Exception as e:
         log.warning("warm_odds_cache: %s", e)
-    except Exception as e:
-        log.error("init_db: %s", e)
 
     if not config.telegram_token:
         log.error("TELEGRAM_BOT_TOKEN не задан")
@@ -82,7 +83,8 @@ async def _init_bot():
 
     # Telegram
     from bot import build_application
-    tg_app = build_application(config.telegram_token)
+    proxy = os.getenv("TG_PROXY", "")
+    tg_app = build_application(config.telegram_token, proxy=proxy)
 
     for attempt in range(1, 6):
         try:
