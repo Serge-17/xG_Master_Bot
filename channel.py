@@ -21,6 +21,19 @@ from db import Signal, set_signal_message_id
 log = logging.getLogger(__name__)
 
 
+LEAGUE_TITLES_RU = {
+    "Premier League": "Англия. Премьер-лига",
+    "EPL": "Англия. Премьер-лига",
+    "La Liga": "Испания. Ла Лига",
+    "Bundesliga": "Германия. Бундеслига",
+    "Serie A": "Италия. Серия А",
+    "Ligue 1": "Франция. Лига 1",
+    "Eredivisie": "Нидерланды. Эредивизи",
+    "Primeira Liga": "Португалия. Примейра",
+    "Championship": "Англия. Чемпионшип",
+}
+
+
 def _confidence_bar(pct: int) -> str:
     filled = round(max(0, min(100, pct)) / 10)
     return "🟢" * filled + "⬜" * (10 - filled)
@@ -33,22 +46,33 @@ def _kickoff_local(match: Match) -> str:
     return dt.strftime("%d.%m %H:%M UTC")
 
 
+def _league_ru(name: str) -> str:
+    return LEAGUE_TITLES_RU.get(name, name or "Неизвестная лига")
+
+
+def _form_ru(form: str) -> str:
+    mapping = {"W": "В", "D": "Н", "L": "П", "—": "—"}
+    parts = [mapping.get(part, part) for part in (form or "").split()]
+    return " ".join(parts) if parts else "— — — — —"
+
+
 def format_signal_post(match: Match, pick: Pick, reasoning: str, risks: str,
                        home_form: str, away_form: str) -> str:
     confidence_pct = int(round(pick.probability * 100))
     return (
-        f"⚽ <b>{match.home} vs {match.away}</b>\n"
-        f"🏆 {match.competition}  |  🕐 {_kickoff_local(match)}\n\n"
-        f"📌 <b>Ставка:</b> {pick.pick}\n"
-        f"📊 Коэф. букмекера: <b>{pick.book_odds:.2f}</b>\n"
-        f"🧮 Наш fair-odds:   <b>{pick.fair_odds:.2f}</b>\n"
-        f"📈 Вероятность:   <b>{confidence_pct}%</b>  {_confidence_bar(confidence_pct)}\n"
-        f"💎 Value edge:    <b>{pick.edge*100:+.1f}%</b>\n\n"
-        f"🏠 Форма хозяев: <code>{home_form}</code>\n"
-        f"✈️ Форма гостей: <code>{away_form}</code>\n\n"
-        f"🧠 <b>Почему value:</b>\n{reasoning}\n\n"
+        f"🏆 <b>{_league_ru(match.competition)}</b>\n"
+        f"⚽ <b>{match.home} — {match.away}</b>\n"
+        f"🕐 {_kickoff_local(match)}\n\n"
+        f"📌 <b>Рекомендуемая ставка:</b> {pick.pick}\n"
+        f"💰 <b>Коэффициент букмекера:</b> {pick.book_odds:.2f}\n"
+        f"🧮 <b>Справедливый коэффициент по модели:</b> {pick.fair_odds:.2f}\n"
+        f"📈 <b>Вероятность по модели:</b> {confidence_pct}% {_confidence_bar(confidence_pct)}\n"
+        f"📊 <b>Преимущество над линией:</b> {pick.edge*100:+.1f}%\n"
+        f"💵 <b>Рекомендуемый размер ставки:</b> {pick.recommended_stake:.0f} ₽\n\n"
+        f"🏠 <b>Форма хозяев:</b> <code>{_form_ru(home_form)}</code>\n"
+        f"✈️ <b>Форма гостей:</b> <code>{_form_ru(away_form)}</code>\n\n"
+        f"🧠 <b>Почему ставка выглядит интересной:</b>\n{reasoning}\n\n"
         f"⚠️ <b>Риски:</b> {risks}\n\n"
-        f"💰 <b>Рекомендация:</b> {pick.recommended_stake:.0f} ₽\n\n"
         f"<i>Это рекомендация на основе модели, не гарантия. "
         f"Играйте ответственно — ставки связаны с риском потери денег.</i>"
     )
@@ -76,7 +100,7 @@ def format_matches_digest(items: list) -> str:
     lines = ["📅 <b>Матчи сегодня</b>\n"]
     for item in items[:12]:
         kickoff = item.kickoff.strftime("%H:%M") if getattr(item, "kickoff", None) else "—:—"
-        league = getattr(item, "league", "") or getattr(item, "competition", "") or "—"
+        league = _league_ru(getattr(item, "league", "") or getattr(item, "competition", "") or "—")
         payload = {}
         raw = getattr(item, "raw_payload", "{}") or "{}"
         if isinstance(raw, str):
@@ -92,7 +116,7 @@ def format_matches_digest(items: list) -> str:
                 f"\nП1 {odds['home']:.2f} | X {odds['draw']:.2f} | П2 {odds['away']:.2f}"
             )
         lines.append(
-            f"• <b>{item.home} vs {item.away}</b>\n"
+            f"• <b>{item.home} — {item.away}</b>\n"
             f"{kickoff} UTC • <i>{league}</i>{odds_line}"
         )
     lines.append(
