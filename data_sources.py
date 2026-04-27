@@ -97,6 +97,13 @@ async def fetch_matches(days_ahead: int = 1) -> list[Match]:
         log.info("fetch_matches: из кэша (%d матчей)", len(_matches_cache))
         return _matches_cache
 
+    odds_matches = await _fetch_matches_from_odds_cache(days_ahead=days_ahead)
+    if odds_matches:
+        _matches_cache = odds_matches
+        _matches_cache_ts = time.monotonic()
+        log.info("Найдено матчей через odds-api: %d", len(odds_matches))
+        return odds_matches
+
     try:
         from web_scrapers import scrape_sports_ru_matches
 
@@ -182,6 +189,56 @@ async def fetch_matches(days_ahead: int = 1) -> list[Match]:
         _matches_cache = matches
         _matches_cache_ts = time.monotonic()
     return matches
+
+
+async def _fetch_matches_from_odds_cache(days_ahead: int = 1) -> list[Match]:
+    if not config.odds_api_key:
+        return []
+
+    timeout = aiohttp.ClientTimeout(total=20)
+    now_utc = datetime.now(timezone.utc)
+    limit_dt = now_utc + timedelta(days=days_ahead)
+    results: list[Match] = []
+    seen: set[str] = set()
+
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        for i, sport in enumerate(config.odds_sports):
+            cached = _odds_cache.get(sport)
+            if cached and (time.monotonic() - cached[0]) < _ODDS_CACHE_TTL:
+                events = cached[1]
+            else:
+                if i > 0:
+                    await asyncio.sleep(1.0)
+                events = await _fetch_sport_odds(http, sport)
+
+            for ev in events:
+                home = ev.get("home_team", "")
+                away = ev.get("away_team", "")
+                if not home or not away:
+                    continue
+                commence_raw = ev.get("commence_time")
+                kickoff = None
+                if commence_raw:
+                    try:
+                        kickoff = datetime.fromisoformat(commence_raw.replace("Z", "+00:00"))
+                    except Exception:
+                        kickoff = None
+                if kickoff and not (now_utc - timedelta(hours=4) <= kickoff <= limit_dt):
+                    continue
+                match_key = ev.get("id") or f"{sport}:{home}:{away}:{commence_raw}"
+                if match_key in seen:
+                    continue
+                seen.add(match_key)
+                results.append(Match(
+                    home=home,
+                    away=away,
+                    competition=ev.get("sport_title") or sport,
+                    utc_date=kickoff,
+                    external_id=str(ev.get("id", "")),
+                ))
+
+    results.sort(key=lambda m: m.utc_date or now_utc)
+    return results
 
 
 async def fetch_team_form(team_name: str, limit: int = 5) -> TeamForm:
