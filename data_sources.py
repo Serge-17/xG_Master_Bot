@@ -335,7 +335,7 @@ async def _fetch_sport_odds(http: aiohttp.ClientSession, sport: str) -> list:
     params = {
         "apiKey": config.odds_api_key,
         "regions": "eu",
-        "markets": "h2h,totals,btts",
+        "markets": "h2h,totals",
         "oddsFormat": "decimal",
     }
     try:
@@ -348,7 +348,8 @@ async def _fetch_sport_odds(http: aiohttp.ClientSession, sport: str) -> list:
                 log.error("odds-api: неверный ключ (401)")
                 return []
             if r.status != 200:
-                log.warning("odds-api [%s] status %s", sport, r.status)
+                body = await r.text()
+                log.warning("odds-api [%s] status %s: %s", sport, r.status, body[:300])
                 return []
             events = await r.json()
             _odds_cache[sport] = (now, events)
@@ -383,6 +384,7 @@ async def fetch_odds(home: str, away: str) -> Optional[Odds]:
                 ev_away = ev.get("away_team", "")
                 if _teams_match(home, ev_home) and _teams_match(away, ev_away):
                     odds = _best_odds_from_event(ev, ev_home)
+                    await _enrich_event_odds(http, ev, odds)
                     if odds.has_1x2():
                         log.info(
                             "Odds найдены [%s]: %s vs %s → H%.2f D%.2f A%.2f",
@@ -409,3 +411,42 @@ async def warm_odds_cache():
                 await asyncio.sleep(2.0)
             await _fetch_sport_odds(http, sport)
     log.info("Кэш коэффициентов готов")
+
+
+async def _enrich_event_odds(http: aiohttp.ClientSession, event: dict, odds: Odds) -> None:
+    """Подтягивает дополнительные рынки для конкретного события.
+
+    По документации The Odds API endpoint `/sports/{sport}/odds` поддерживает
+    только featured markets. Для `btts` используем event odds endpoint.
+    """
+    sport = event.get("sport_key")
+    event_id = event.get("id")
+    if not sport or not event_id:
+        return
+
+    if odds.btts_yes > 1 and odds.btts_no > 1:
+        return
+
+    url = f"{config.odds_base}/sports/{sport}/events/{event_id}/odds"
+    params = {
+        "apiKey": config.odds_api_key,
+        "regions": "eu",
+        "markets": "btts",
+        "oddsFormat": "decimal",
+    }
+    try:
+        async with http.get(url, params=params) as r:
+            if r.status != 200:
+                return
+            payload = await r.json()
+    except Exception as e:
+        log.debug("event-odds btts failed for %s: %s", event_id, e)
+        return
+
+    enriched = _best_odds_from_event(payload, payload.get("home_team", ""))
+    if enriched.btts_yes > odds.btts_yes:
+        odds.btts_yes = enriched.btts_yes
+    if enriched.btts_no > odds.btts_no:
+        odds.btts_no = enriched.btts_no
+    if enriched.bookmaker and not odds.bookmaker:
+        odds.bookmaker = enriched.bookmaker
