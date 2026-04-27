@@ -65,12 +65,15 @@ def _extract_json(text: str) -> Optional[dict]:
 # ────────────────────────────────────────────────────────────────
 async def explain_pick(home: str, away: str, competition: str,
                        pick_label: str, probability: float,
-                       book_odds: float, fair_odds: float) -> dict:
+                       book_odds: float, fair_odds: float,
+                       extra_context: str = "") -> dict:
     """Возвращает dict с ключами: reasoning, risks, home_form, away_form."""
+    context_suffix = f"\nДоп. контекст:\n{extra_context}\n" if extra_context else ""
     fallback = {
         "reasoning": (
             f"Модель оценивает вероятность {probability:.0%} против "
-            f"рыночных ~{1/book_odds:.0%}. Это value."
+            f"рыночных ~{1/book_odds:.0%}. Это value. "
+            f"{extra_context[:220]}".strip()
         ),
         "risks": "Данные о составах и травмах могли не учесть событий последних часов.",
         "home_form": "— — — — —",
@@ -84,6 +87,7 @@ async def explain_pick(home: str, away: str, competition: str,
         f"Модель выбрала ставку: «{pick_label}».\n"
         f"Модельная вероятность: {probability:.1%}. "
         f"Коэффициент букмекера: {book_odds}. Наш fair-odds: {fair_odds}.\n\n"
+        f"{context_suffix}"
         "Вкратце объясни почему это может быть value-ставка: форма, xG, "
         "мотивация, домашний/выездной фактор. Укажи 1–2 главных риска.\n\n"
         "Ответь СТРОГО в JSON без пояснений вне JSON:\n"

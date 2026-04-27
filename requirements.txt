@@ -13,6 +13,7 @@ aiosqlite==0.20.0
 
 # HTTP клиент для внешних API (Gemini, football-data, the-odds-api)
 aiohttp==3.9.5
+beautifulsoup4==4.12.3
 
 # Планировщик — ежедневный Матч дня
 apscheduler==3.10.4

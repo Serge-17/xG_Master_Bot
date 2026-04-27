@@ -72,6 +72,35 @@ def channel_post_keyboard(signal_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+def format_matches_digest(items: list) -> str:
+    lines = ["📅 <b>Матчи сегодня</b>\n"]
+    for item in items[:12]:
+        kickoff = item.kickoff.strftime("%H:%M") if getattr(item, "kickoff", None) else "—:—"
+        league = getattr(item, "league", "") or getattr(item, "competition", "") or "—"
+        payload = {}
+        raw = getattr(item, "raw_payload", "{}") or "{}"
+        if isinstance(raw, str):
+            try:
+                import json
+                payload = json.loads(raw)
+            except Exception:
+                payload = {}
+        odds = payload.get("odds", {})
+        odds_line = ""
+        if odds.get("home") and odds.get("draw") and odds.get("away"):
+            odds_line = (
+                f"\nП1 {odds['home']:.2f} | X {odds['draw']:.2f} | П2 {odds['away']:.2f}"
+            )
+        lines.append(
+            f"• <b>{item.home} vs {item.away}</b>\n"
+            f"{kickoff} UTC • <i>{league}</i>{odds_line}"
+        )
+    lines.append(
+        "\n<i>Коэффициенты сохранены в базе и будут обновляться несколько раз в день.</i>"
+    )
+    return "\n".join(lines)
+
+
 async def publish_signal(bot: Bot, signal: Signal, match: Match) -> bool:
     """Публикует сигнал в CHANNEL_ID. При успехе сохраняет message_id в БД."""
     if not config.channel_id:

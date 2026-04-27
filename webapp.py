@@ -73,9 +73,11 @@ async def _init_bot():
     # Прогрев кэша коэффициентов
     try:
         from data_sources import warm_odds_cache
+        from scanner import warmup_match_cache
         await warm_odds_cache()
+        await warmup_match_cache(limit=24)
     except Exception as e:
-        log.warning("warm_odds_cache: %s", e)
+        log.warning("warm caches: %s", e)
 
     if not config.telegram_token:
         log.error("TELEGRAM_BOT_TOKEN не задан")

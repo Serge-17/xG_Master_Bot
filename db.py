@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from sqlalchemy import (
@@ -93,6 +93,50 @@ class Bet(Base):
     note = Column(Text)
     created_at = Column(DateTime, default=utcnow)
     closed_at = Column(DateTime)
+
+
+class CachedMatch(Base):
+    __tablename__ = "cached_matches"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    match_key = Column(String(255), unique=True, nullable=False, index=True)
+    external_id = Column(String(64))
+    match = Column(String(255), nullable=False)
+    home = Column(String(128), nullable=False)
+    away = Column(String(128), nullable=False)
+    league = Column(String(128))
+    kickoff = Column(DateTime)
+    source = Column(String(32), default="api")
+    source_url = Column(Text)
+    facts = Column(Text, default="[]")
+    stats = Column(Text, default="[]")
+    injuries = Column(Text, default="[]")
+    home_form = Column(String(32), default="— — — — —")
+    away_form = Column(String(32), default="— — — — —")
+    home_summary = Column(Text)
+    away_summary = Column(Text)
+    raw_payload = Column(Text, default="{}")
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+    created_at = Column(DateTime, default=utcnow)
+
+
+class OddsSnapshot(Base):
+    __tablename__ = "odds_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    match_key = Column(String(255), nullable=False, index=True)
+    match = Column(String(255), nullable=False)
+    bookmaker = Column(String(128), default="")
+    source = Column(String(32), default="api")
+    source_url = Column(Text)
+    home = Column(Float, default=0.0)
+    draw = Column(Float, default=0.0)
+    away = Column(Float, default=0.0)
+    over_2_5 = Column(Float, default=0.0)
+    under_2_5 = Column(Float, default=0.0)
+    btts_yes = Column(Float, default=0.0)
+    btts_no = Column(Float, default=0.0)
+    fetched_at = Column(DateTime, default=utcnow, index=True)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -253,6 +297,123 @@ async def find_signal_by_match(query: str, limit: int = 10) -> list[Signal]:
             .order_by(Signal.created_at.desc()).limit(limit)
         )
         return list(res.scalars().all())
+
+
+async def upsert_cached_match(
+    *,
+    match_key: str,
+    match: str,
+    home: str,
+    away: str,
+    league: str = "",
+    kickoff: Optional[datetime] = None,
+    external_id: str = "",
+    source: str = "api",
+    source_url: str = "",
+    facts: Optional[list[str]] = None,
+    stats: Optional[list[str]] = None,
+    injuries: Optional[list[str]] = None,
+    home_form: str = "— — — — —",
+    away_form: str = "— — — — —",
+    home_summary: str = "",
+    away_summary: str = "",
+    raw_payload: Optional[dict] = None,
+) -> int:
+    async with session() as s:
+        res = await s.execute(select(CachedMatch).where(CachedMatch.match_key == match_key))
+        row = res.scalar_one_or_none()
+        values = dict(
+            external_id=external_id,
+            match=match,
+            home=home,
+            away=away,
+            league=league,
+            kickoff=kickoff,
+            source=source,
+            source_url=source_url,
+            facts=json.dumps(facts or [], ensure_ascii=False),
+            stats=json.dumps(stats or [], ensure_ascii=False),
+            injuries=json.dumps(injuries or [], ensure_ascii=False),
+            home_form=home_form,
+            away_form=away_form,
+            home_summary=home_summary,
+            away_summary=away_summary,
+            raw_payload=json.dumps(raw_payload or {}, ensure_ascii=False),
+            updated_at=utcnow(),
+        )
+        if row is None:
+            row = CachedMatch(match_key=match_key, **values)
+            s.add(row)
+        else:
+            for key, value in values.items():
+                setattr(row, key, value)
+        await s.commit()
+        await s.refresh(row)
+        return row.id
+
+
+async def get_cached_match(match_key: str) -> Optional[CachedMatch]:
+    async with session() as s:
+        res = await s.execute(select(CachedMatch).where(CachedMatch.match_key == match_key))
+        return res.scalar_one_or_none()
+
+
+async def list_cached_matches_for_date(day: date) -> list[CachedMatch]:
+    async with session() as s:
+        res = await s.execute(
+            select(CachedMatch)
+            .where(func.date(CachedMatch.kickoff) == day)
+            .order_by(CachedMatch.kickoff.asc().nulls_last())
+        )
+        return list(res.scalars().all())
+
+
+async def save_odds_snapshot(
+    *,
+    match_key: str,
+    match: str,
+    bookmaker: str = "",
+    source: str = "api",
+    source_url: str = "",
+    home: float = 0.0,
+    draw: float = 0.0,
+    away: float = 0.0,
+    over_2_5: float = 0.0,
+    under_2_5: float = 0.0,
+    btts_yes: float = 0.0,
+    btts_no: float = 0.0,
+) -> int:
+    async with session() as s:
+        snap = OddsSnapshot(
+            match_key=match_key,
+            match=match,
+            bookmaker=bookmaker,
+            source=source,
+            source_url=source_url,
+            home=home,
+            draw=draw,
+            away=away,
+            over_2_5=over_2_5,
+            under_2_5=under_2_5,
+            btts_yes=btts_yes,
+            btts_no=btts_no,
+        )
+        s.add(snap)
+        await s.commit()
+        await s.refresh(snap)
+        return snap.id
+
+
+async def get_latest_odds_snapshot(match_key: str, max_age_hours: int = 8) -> Optional[OddsSnapshot]:
+    cutoff_dt = datetime.fromtimestamp(utcnow().timestamp() - max_age_hours * 3600)
+    async with session() as s:
+        res = await s.execute(
+            select(OddsSnapshot)
+            .where(OddsSnapshot.match_key == match_key, OddsSnapshot.fetched_at >= cutoff_dt)
+            .order_by(OddsSnapshot.fetched_at.desc())
+            .limit(1)
+        )
+        return res.scalar_one_or_none()
 
 
 # ────────────────────────────────────────────────────────────────

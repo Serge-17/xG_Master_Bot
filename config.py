@@ -110,6 +110,7 @@ class Config:
 
     # Расписание (UTC)
     daily_scan_hour: int = 9
+    daily_digest_hour: int = 12
     max_signals_per_day: int = 5
 
     # HTTP / Space

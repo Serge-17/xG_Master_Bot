@@ -61,6 +61,25 @@ class Odds:
         return self.home > 0 and self.draw > 0 and self.away > 0
 
 
+@dataclass
+class TeamForm:
+    form: str = "— — — — —"
+    goals_for: int = 0
+    goals_against: int = 0
+    wins: int = 0
+    draws: int = 0
+    losses: int = 0
+
+    def summary(self) -> str:
+        games = self.wins + self.draws + self.losses
+        if games <= 0:
+            return "Статистика формы недоступна."
+        return (
+            f"Последние {games} игр: {self.wins}-{self.draws}-{self.losses}, "
+            f"мячи {self.goals_for}:{self.goals_against}."
+        )
+
+
 # ────────────────────────────────────────────────────────────────
 # football-data.org — матчи дня
 # ────────────────────────────────────────────────────────────────
@@ -137,8 +156,87 @@ async def fetch_matches(days_ahead: int = 1) -> list[Match]:
     return matches
 
 
+async def fetch_team_form(team_name: str, limit: int = 5) -> TeamForm:
+    if not config.football_api_key:
+        return TeamForm()
+
+    headers = {"X-Auth-Token": config.football_api_key}
+    timeout = aiohttp.ClientTimeout(total=15)
+    all_rows: list[dict] = []
+
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        for comp in config.football_competitions:
+            url = f"{config.football_base}/competitions/{comp}/matches"
+            params = {
+                "status": "FINISHED",
+                "dateFrom": (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y-%m-%d"),
+                "dateTo": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            }
+            try:
+                async with http.get(url, headers=headers, params=params) as r:
+                    if r.status != 200:
+                        continue
+                    payload = await r.json()
+            except Exception:
+                continue
+
+            for match in payload.get("matches", []):
+                home = match.get("homeTeam", {}).get("name", "")
+                away = match.get("awayTeam", {}).get("name", "")
+                if _teams_match(team_name, home) or _teams_match(team_name, away):
+                    all_rows.append(match)
+
+    all_rows.sort(key=lambda m: m.get("utcDate", ""), reverse=True)
+    all_rows = all_rows[:limit]
+    if not all_rows:
+        return TeamForm()
+
+    form: list[str] = []
+    gf = ga = wins = draws = losses = 0
+    for match in all_rows:
+        home = match.get("homeTeam", {}).get("name", "")
+        score = match.get("score", {}).get("fullTime", {})
+        home_goals = int(score.get("home") or 0)
+        away_goals = int(score.get("away") or 0)
+        is_home = _teams_match(team_name, home)
+
+        if is_home:
+            gf += home_goals
+            ga += away_goals
+            if home_goals > away_goals:
+                wins += 1
+                form.append("W")
+            elif home_goals == away_goals:
+                draws += 1
+                form.append("D")
+            else:
+                losses += 1
+                form.append("L")
+        else:
+            gf += away_goals
+            ga += home_goals
+            if away_goals > home_goals:
+                wins += 1
+                form.append("W")
+            elif away_goals == home_goals:
+                draws += 1
+                form.append("D")
+            else:
+                losses += 1
+                form.append("L")
+
+    return TeamForm(
+        form=" ".join(form) if form else "— — — — —",
+        goals_for=gf,
+        goals_against=ga,
+        wins=wins,
+        draws=draws,
+        losses=losses,
+    )
+
+
 async def fetch_team_recent_form(team_name: str, limit: int = 5) -> str:
-    return "— — — — —"
+    return (await fetch_team_form(team_name, limit=limit)).form
 
 
 # ────────────────────────────────────────────────────────────────

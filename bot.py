@@ -4,6 +4,7 @@ bot.py — Telegram handlers xG Master Bot v3.0
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -30,10 +31,11 @@ from config import config
 from data_sources import Match, fetch_matches, fetch_odds
 from db import (
     add_bet, close_bet, ensure_user, find_signal_by_match, get_bank,
-    get_settings, get_signal, list_signals, list_todays_signals,
+    get_cached_match, get_settings, get_signal, list_cached_matches_for_date,
+    list_signals, list_todays_signals,
     retro_report, save_signal, set_bank, stats_for_user, update_settings,
 )
-from scanner import scan_and_publish
+from scanner import _prepare_match_cache, scan_and_publish, warmup_match_cache
 
 log = logging.getLogger(__name__)
 
@@ -98,7 +100,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⚽ <b>xG Master Bot</b>\n\n"
         "Ищу value-ставки по топ-лигам. Считаю Poisson + Kelly, "
-        "AI-комментарий через Gemini.\n\n"
+        "подтягиваю форму, новости и веб-контекст по матчам.\n\n"
         f"{DISCLAIMER}\n\n"
         "Выбери действие:",
         parse_mode=ParseMode.HTML,
@@ -274,6 +276,10 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"Edge: <b>{sig.edge*100:+.1f}%</b>"
             )
         else:
+            cached = None
+            if sig.kickoff:
+                match_key = f"{sig.kickoff.strftime('%Y%m%d%H%M')}:{sig.match.split(' vs ')[0].lower()}:{sig.match.split(' vs ')[-1].lower()}:"
+                cached = await get_cached_match(match_key)
             body = (
                 f"🧠 <b>Анализ — {sig.match}</b>\n\n"
                 f"Ставка: <b>{sig.pick}</b>\n"
@@ -281,7 +287,10 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"<b>Почему value:</b>\n{sig.reasoning or '—'}\n\n"
                 f"<b>Риски:</b> {sig.risks or '—'}\n\n"
                 f"🏠 Форма: <code>{sig.home_form or '— — — — —'}</code>\n"
-                f"✈️ Форма: <code>{sig.away_form or '— — — — —'}</code>"
+                f"✈️ Форма: <code>{sig.away_form or '— — — — —'}</code>\n\n"
+                f"🩺 Травмы/новости: {_render_cached_list(getattr(cached, 'injuries', '[]'), 2)}\n"
+                f"📌 Факты: {_render_cached_list(getattr(cached, 'facts', '[]'), 3)}\n"
+                f"📊 Статистика: {_render_cached_list(getattr(cached, 'stats', '[]'), 3)}"
             )
         await q.message.reply_text(body, parse_mode=ParseMode.HTML); return
 
@@ -289,15 +298,15 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── Матчи дня (красивое форматирование) ─────────────────────────
 async def _show_matches_day(q):
     await q.message.edit_text("⏳ Загружаю расписание...", reply_markup=back_button())
-    matches = await fetch_matches()
+    matches = await _matches_for_today_view()
     if not matches:
         await q.message.edit_text("📭 На сегодня матчей не найдено.", reply_markup=back_button())
         return
 
-    # Группируем по лиге
-    by_league: dict[str, list[Match]] = {}
+    by_league: dict[str, list] = {}
     for m in matches:
-        by_league.setdefault(m.competition, []).append(m)
+        league = getattr(m, "league", "") or getattr(m, "competition", "") or "—"
+        by_league.setdefault(league, []).append(m)
 
     lines = ["📅 <b>Матчи сегодня</b>\n"]
     for league, ms in list(by_league.items())[:8]:
@@ -305,9 +314,7 @@ async def _show_matches_day(q):
         lines.append(f"\n{emoji} <b>{league}</b>")
         lines.append("─" * 20)
         for m in ms[:5]:
-            ts = m.utc_date.strftime("%H:%M") if m.utc_date else "--:--"
-            lines.append(f"🕐 <b>{ts} UTC</b>")
-            lines.append(f"   {m.home} 🆚 {m.away}")
+            lines.append(_render_match_card(m))
         if len(ms) > 5:
             lines.append(f"   <i>...ещё {len(ms)-5} матчей</i>")
 
@@ -465,7 +472,7 @@ async def _analyze_match(q, ctx, user_id: int):
 
     try:
         bank = await get_bank(user_id) or 10000.0
-        odds = await fetch_odds(match.home, match.away)
+        odds, cached = await _prepare_match_cache(match)
 
         if not odds or not odds.has_1x2():
             await q.message.edit_text(
@@ -496,10 +503,10 @@ async def _analyze_match(q, ctx, user_id: int):
             )
             return
 
-        # Получаем AI-комментарий
         meta = await explain_pick(
             match.home, match.away, match.competition,
             pick.pick, pick.probability, pick.book_odds, pick.fair_odds,
+            extra_context=_cached_match_context(cached),
         )
 
         stake = pick.recommended_stake
@@ -522,6 +529,14 @@ async def _analyze_match(q, ctx, user_id: int):
             lines += ["", "🧠 <b>Анализ:</b>", meta["reasoning"]]
         if meta.get("risks"):
             lines += ["", f"⚠️ <b>Риски:</b> {meta['risks']}"]
+        if cached:
+            lines += [
+                "",
+                f"🏠 Форма хозяев: <code>{getattr(cached, 'home_form', '— — — — —')}</code>",
+                f"✈️ Форма гостей: <code>{getattr(cached, 'away_form', '— — — — —')}</code>",
+                f"🩺 Травмы/новости: {_render_cached_list(getattr(cached, 'injuries', '[]'), 2)}",
+                f"📌 Факты: {_render_cached_list(getattr(cached, 'facts', '[]'), 2)}",
+            ]
 
         lines += ["", DISCLAIMER]
 
@@ -667,6 +682,61 @@ def _signals_list_text(sigs: list, title: str = "🔮 Прогнозы") -> str:
             f"| {int(s.probability*100)}%  | ⏰ {ko}\n"
         )
     return "\n".join(lines)
+
+
+def _render_cached_list(raw: str, limit: int = 2) -> str:
+    try:
+        items = json.loads(raw or "[]")
+    except Exception:
+        items = []
+    return ", ".join(items[:limit]) if items else "—"
+
+
+def _cached_match_context(cached) -> str:
+    if not cached:
+        return ""
+    parts = []
+    for label, raw in [("Факты", cached.facts), ("Статистика", cached.stats), ("Травмы", cached.injuries)]:
+        text = _render_cached_list(raw, 3)
+        if text != "—":
+            parts.append(f"{label}: {text}")
+    if getattr(cached, "home_summary", ""):
+        parts.append(f"{cached.home}: {cached.home_summary}")
+    if getattr(cached, "away_summary", ""):
+        parts.append(f"{cached.away}: {cached.away_summary}")
+    return "\n".join(parts)
+
+
+def _render_match_card(item) -> str:
+    kickoff_dt = getattr(item, "kickoff", None) or getattr(item, "utc_date", None)
+    kickoff = kickoff_dt.strftime("%H:%M") if kickoff_dt else "--:--"
+    lines = [
+        f"🕐 <b>{kickoff} UTC</b>",
+        f"   {item.home} 🆚 {item.away}",
+    ]
+    raw = getattr(item, "raw_payload", "{}") or "{}"
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        payload = {}
+    odds = payload.get("odds", {})
+    if odds.get("home") and odds.get("draw") and odds.get("away"):
+        lines.append(
+            f"   П1 <b>{odds['home']:.2f}</b> | X <b>{odds['draw']:.2f}</b> | П2 <b>{odds['away']:.2f}</b>"
+        )
+    return "\n".join(lines)
+
+
+async def _matches_for_today_view():
+    today = datetime.now(timezone.utc).date()
+    cached = await list_cached_matches_for_date(today)
+    if cached:
+        return cached
+    await warmup_match_cache(limit=18)
+    cached = await list_cached_matches_for_date(today)
+    if cached:
+        return cached
+    return await fetch_matches()
 
 
 async def _show_bank(q, user_id: int):
