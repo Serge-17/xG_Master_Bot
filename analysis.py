@@ -1,17 +1,17 @@
 """
 analysis.py — математика xG Master Bot.
 
-АРХИТЕКТУРНОЕ ИСПРАВЛЕНИЕ:
-Ранее xg_from_odds() решала задачу «найти lambda, при котором Poisson = fair_probs».
-Это создавало замкнутый круг: xG выводится из коэфов → модель сравнивается с теми
-же коэфами → edge всегда ≈ 0.
+Стек:
+- LEAGUE_XG_PRIORS: средние xG по лиге (FBref / Understat 2024/25).
+- Форма команды (gf/ga за 5 матчей) подмешивается в λ — модель
+  становится независимой от 1X2-линии букмекера.
+- Dixon-Coles correction (rho = -0.10) для tau(0,0)/(0,1)/(1,0)/(1,1):
+  поднимает вероятность 0:0/1:0/0:1/1:1 на низких xG, что даёт
+  корректные оценки BTTS-Нет и Под 2.5.
+- Маржа букмекера снимается power-методом.
 
-Новый подход:
-1. Используем LEAGUE_XG_PRIORS — средние xG по каждой лиге из открытых данных.
-2. Корректируем prior небольшим сдвигом из 1X2 fair-probs (direction, не magnitude).
-3. Сравниваем модельные ТОТАЛЫ и BTTS с рыночными коэффициентами.
-   Именно в разрыве между 1X2-рынком и рынком тоталов/BTTS живёт cross-market edge.
-4. Для 1X2 value проверяем только если есть ≥5% gap между fair и book.
+Edge-фильтр поднят до 3% (config.min_edge): на стандартной EU-маржe
+6-8% значения < 3% — это шум модели, не сигнал.
 """
 
 from __future__ import annotations
@@ -24,40 +24,31 @@ import numpy as np
 from scipy.stats import poisson
 
 from config import config
-from data_sources import Odds
+from data_sources import Odds, TeamForm
 
 
 MAX_GOALS = 10
+DC_RHO = -0.10  # Dixon-Coles low-score correction strength
 
 # ── Средние xG по лигам (сезон 2024/25, источник: FBref / Understat) ─────────
 # Формат: (home_xg, away_xg) — средние за матч
 LEAGUE_XG_PRIORS: dict[str, tuple[float, float]] = {
-    # Premier League
     "premier league": (1.55, 1.15),
     "epl": (1.55, 1.15),
-    # La Liga
     "primera division": (1.45, 1.05),
     "la liga": (1.45, 1.05),
-    # Bundesliga
     "bundesliga": (1.65, 1.20),
-    # Serie A
     "serie a": (1.40, 1.00),
-    # Ligue 1
     "ligue 1": (1.35, 1.00),
-    # Eredivisie
     "eredivisie": (1.70, 1.30),
-    # Primeira Liga
     "primeira liga": (1.40, 1.05),
-    # Championship
     "championship": (1.35, 1.10),
     "efl championship": (1.35, 1.10),
-    # Defaults
     "default": (1.45, 1.10),
 }
 
 
 def _league_prior(competition: str) -> tuple[float, float]:
-    """Возвращает (home_xg, away_xg) prior для лиги."""
     key = competition.lower().strip()
     for k, v in LEAGUE_XG_PRIORS.items():
         if k in key or key in k:
@@ -66,14 +57,33 @@ def _league_prior(competition: str) -> tuple[float, float]:
 
 
 # ──────────────────────────────────────────────────────────────────
-# Poisson-модель
+# Dixon-Coles low-score correction
 # ──────────────────────────────────────────────────────────────────
+def _dc_tau(i: int, j: int, lh: float, la: float, rho: float = DC_RHO) -> float:
+    if i == 0 and j == 0:
+        return 1.0 - lh * la * rho
+    if i == 0 and j == 1:
+        return 1.0 + lh * rho
+    if i == 1 and j == 0:
+        return 1.0 + la * rho
+    if i == 1 and j == 1:
+        return 1.0 - rho
+    return 1.0
+
+
 def _score_matrix(home_xg: float, away_xg: float) -> np.ndarray:
     home_xg = max(0.1, home_xg)
     away_xg = max(0.1, away_xg)
     h = np.array([poisson.pmf(i, home_xg) for i in range(MAX_GOALS)])
     a = np.array([poisson.pmf(i, away_xg) for i in range(MAX_GOALS)])
-    return np.outer(h, a)
+    m = np.outer(h, a)
+    # Dixon-Coles correction для четырёх low-score ячеек
+    for i, j in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+        m[i, j] *= _dc_tau(i, j, home_xg, away_xg)
+    total = m.sum()
+    if total > 0:
+        m /= total
+    return m
 
 
 def poisson_probs(home_xg: float, away_xg: float) -> dict:
@@ -91,7 +101,7 @@ def poisson_probs(home_xg: float, away_xg: float) -> dict:
     p_a0 = float(np.sum(m[:, 0]))
     p_00 = float(m[0, 0])
     btts_yes = max(0.0, 1.0 - p_h0 - p_a0 + p_00)
-    btts_no  = max(0.0, 1.0 - btts_yes)
+    btts_no = max(0.0, 1.0 - btts_yes)
 
     return {
         "home": p_home, "draw": p_draw, "away": p_away,
@@ -108,13 +118,12 @@ def implied_probs_fair(odds_list: list[float]) -> list[float]:
     if len(odds) < 2:
         return [1.0 / o if o > 1 else 0.0 for o in odds_list]
 
-    def f(k):
+    def f(k: float) -> float:
         return sum(math.pow(1.0 / o, k) for o in odds) - 1.0
 
     lo, hi = 0.5, 2.0
     for _ in range(60):
         mid = (lo + hi) / 2
-        (lo if f(mid) > 0 else hi).__class__  # dummy
         if f(mid) > 0:
             lo = mid
         else:
@@ -128,33 +137,53 @@ def fair_odds_from_probability(prob: float) -> float:
 
 
 # ──────────────────────────────────────────────────────────────────
-# Оценка xG: league prior + direction adjustment из 1X2 рынка
+# Оценка xG: league prior + форма команд (БЕЗ 1X2)
 # ──────────────────────────────────────────────────────────────────
-def xg_from_odds(odds: Odds, competition: str = "") -> tuple[float, float]:
-    """
-    ИСПРАВЛЕНО: больше не выводим xG из тех же коэффициентов.
+def _form_lambda(form: Optional[TeamForm], league_avg: float) -> float:
+    """Берём gf/ga за прошедшие матчи и комбинируем с league average."""
+    if not form:
+        return league_avg
+    games = form.wins + form.draws + form.losses
+    if games < 2:
+        return league_avg
+    team_gf = form.goals_for / games
+    team_ga = form.goals_against / games
+    # Сила атаки относительно league avg, оборона соперника подмешается через base_a
+    return max(0.3, min(3.5, 0.5 * league_avg + 0.5 * team_gf))
 
-    Используем league prior как базу, затем делаем небольшой сдвиг
-    в направлении 1X2 рыночных сигналов.
-    Это позволяет Poisson-модели быть независимой от рынка тоталов/BTTS.
+
+def xg_from_odds(
+    odds: Odds,
+    competition: str = "",
+    home_form: Optional[TeamForm] = None,
+    away_form: Optional[TeamForm] = None,
+) -> tuple[float, float]:
+    """
+    ИСПРАВЛЕНО: xG больше не выводится из 1X2-коэффициентов.
+
+    λ_home = blend(league_prior_home, team_gf_home_per_game) с поправкой
+             на оборону гостей (team_ga_away_per_game vs league_avg).
+    λ_away — симметрично.
+
+    Это делает Poisson-модель полностью независимой от рынка букмекера —
+    edge на тоталах/BTTS теперь real cross-market, а не круговая зависимость.
     """
     base_h, base_a = _league_prior(competition)
 
-    if not odds.has_1x2():
-        return base_h, base_a
+    lh = _form_lambda(home_form, base_h)
+    la = _form_lambda(away_form, base_a)
 
-    # Считаем рыночный «strength ratio» из fair-probs
-    fair = implied_probs_fair([odds.home, odds.draw, odds.away])
-    p_home, p_draw, p_away = fair[0], fair[1], fair[2]
-
-    # Нейтральный матч: p_home ≈ 0.45, p_away ≈ 0.30
-    # Сдвигаем prior пропорционально силе фаворита (ограниченно: max ±40%)
-    home_strength = (p_home - 0.45) / 0.45   # от -1 до +1 примерно
-    away_strength = (p_away - 0.30) / 0.30
-
-    adj_factor = 0.25  # насколько сильно рынок двигает prior
-    lh = base_h * (1 + home_strength * adj_factor)
-    la = base_a * (1 + away_strength * adj_factor)
+    # Defence adjustment: если у соперника пропуски выше league avg → λ растёт
+    if home_form:
+        games = home_form.wins + home_form.draws + home_form.losses
+        if games >= 2:
+            home_ga = home_form.goals_against / games
+            la *= max(0.7, min(1.4, home_ga / max(0.5, base_a)))
+    if away_form:
+        games = away_form.wins + away_form.draws + away_form.losses
+        if games >= 2:
+            away_ga = away_form.goals_against / games
+            lh *= max(0.7, min(1.4, away_ga / max(0.5, base_h)))
 
     lh = round(max(0.3, min(3.5, lh)), 2)
     la = round(max(0.3, min(3.5, la)), 2)
@@ -189,11 +218,12 @@ class Pick:
     fair_odds: float
     edge: float
     recommended_stake: float
+    market_probability: float = 0.0  # fair_prob букмекера для словесного сравнения
 
 
-def _pack(market: str, label: str, prob: float, book: float,
-          bank: float, min_edge: float = 0.015,
-          min_conf: float = 0.38) -> Optional[Pick]:
+def _pack(market: str, label: str, prob: float, book: float, market_prob: float,
+          bank: float, min_edge: float,
+          min_conf: float) -> Optional[Pick]:
     if book <= 1 or prob <= 0:
         return None
     if prob < min_conf:
@@ -209,48 +239,55 @@ def _pack(market: str, label: str, prob: float, book: float,
         market=market, pick=label, probability=prob,
         book_odds=round(book, 2), fair_odds=fair,
         edge=round(edge, 3), recommended_stake=stake,
+        market_probability=round(market_prob, 4),
     )
 
 
 def build_value_picks(home: str, away: str, odds: Odds,
                       model: dict, bank: float,
-                      min_edge: float = 0.015,
-                      min_conf: float = 0.38) -> list[Pick]:
+                      min_edge: Optional[float] = None,
+                      min_conf: float = 0.40) -> list[Pick]:
     """
-    VALUE PICKS — строим cross-market:
-    - 1X2: только если модель и рынок расходятся ≥ 2% после снятия маржи
-    - Тоталы и BTTS: главный cross-market источник, сравниваем модель с рынком
+    Строим cross-market value-сигналы:
+    - 1X2: только если модель и рынок расходятся ≥ 4% (cross-market check).
+    - Тоталы и BTTS: основная зона value, сравниваем модельные p против fair-prob рынка.
     """
+    if min_edge is None:
+        min_edge = config.min_edge
+
     candidates: list[Optional[Pick]] = []
-
-    # Снимаем маржу с 1X2 для сравнения
     fair_1x2 = implied_probs_fair([odds.home, odds.draw, odds.away]) \
-        if odds.has_1x2() else [0, 0, 0]
+        if odds.has_1x2() else [0.0, 0.0, 0.0]
 
-    # 1X2: берём только где модель даёт ≥2% gap от fair-рынка
+    # 1X2: cross-market gate ≥ 4%
     for label, m_prob, f_prob, book in [
-        (f"Победа {home}", model["home"],  fair_1x2[0], odds.home),
-        (f"Победа {away}", model["away"],  fair_1x2[2], odds.away),
+        (f"Победа {home}", model["home"], fair_1x2[0], odds.home),
+        (f"Победа {away}", model["away"], fair_1x2[2], odds.away),
     ]:
-        if abs(m_prob - f_prob) >= 0.04:  # разрыв ≥4% — признак cross-market
-            p = _pack("1X2", label, m_prob, book, bank, min_edge, min_conf)
+        if abs(m_prob - f_prob) >= 0.04:
+            p = _pack("1X2", label, m_prob, book, f_prob, bank, min_edge, min_conf)
             if p:
                 candidates.append(p)
 
-    # Тоталы
-    if odds.over_2_5 > 1:
+    # Тоталы 2.5
+    if odds.over_2_5 > 1 and odds.under_2_5 > 1:
+        fair_tot = implied_probs_fair([odds.over_2_5, odds.under_2_5])
         candidates.append(_pack("TOTAL_2_5", "Тотал больше 2.5",
-                                model["over_2_5"], odds.over_2_5, bank, min_edge, min_conf))
-    if odds.under_2_5 > 1:
+                                model["over_2_5"], odds.over_2_5, fair_tot[0],
+                                bank, min_edge, min_conf))
         candidates.append(_pack("TOTAL_2_5", "Тотал меньше 2.5",
-                                model["under_2_5"], odds.under_2_5, bank, min_edge, min_conf))
+                                model["under_2_5"], odds.under_2_5, fair_tot[1],
+                                bank, min_edge, min_conf))
+
     # BTTS
-    if odds.btts_yes > 1:
+    if odds.btts_yes > 1 and odds.btts_no > 1:
+        fair_btts = implied_probs_fair([odds.btts_yes, odds.btts_no])
         candidates.append(_pack("BTTS", "Обе забьют — Да",
-                                model["btts_yes"], odds.btts_yes, bank, min_edge, min_conf))
-    if odds.btts_no > 1:
+                                model["btts_yes"], odds.btts_yes, fair_btts[0],
+                                bank, min_edge, min_conf))
         candidates.append(_pack("BTTS", "Обе забьют — Нет",
-                                model["btts_no"], odds.btts_no, bank, min_edge, min_conf))
+                                model["btts_no"], odds.btts_no, fair_btts[1],
+                                bank, min_edge, min_conf))
 
     picks = [p for p in candidates if p is not None]
     picks.sort(key=lambda p: p.edge, reverse=True)
@@ -265,13 +302,12 @@ def best_value_pick(home: str, away: str, odds: Odds,
 def best_guess_pick(home: str, away: str, odds: Odds,
                     model: dict, bank: float) -> Optional[Pick]:
     """
-    FALLBACK: если строгих value-ставок нет — возвращаем лучший pick
-    с очень мягкими фильтрами (edge ≥ 0, conf ≥ 30%).
-    Используется для показа пользователю даже когда edge небольшой.
+    FALLBACK: если строгих value-ставок нет — мягкие фильтры
+    (edge ≥ -3%, conf ≥ 32%). Используется для показа пользователю.
     """
     picks = build_value_picks(
         home, away, odds, model, bank,
-        min_edge=-0.05,  # разрешаем небольшой минус (рынок может ошибаться)
-        min_conf=0.30,
+        min_edge=-0.03,
+        min_conf=0.32,
     )
     return picks[0] if picks else None

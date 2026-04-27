@@ -63,19 +63,49 @@ def _extract_json(text: str) -> Optional[dict]:
 # ────────────────────────────────────────────────────────────────
 # Комментарий к value-пику
 # ────────────────────────────────────────────────────────────────
+def _parse_capper_text(text: str) -> dict:
+    """Парсим free-form ответ Gemini по секциям ПОЧЕМУ/РИСК/ФОРМА_Х/ФОРМА_Г."""
+    out = {"reasoning": "", "risks": "", "home_form": "", "away_form": ""}
+    if not text:
+        return out
+
+    sections = {
+        "reasoning": re.search(r"(?:ПОЧЕМУ|БЕРЁМ|АНАЛИЗ)[:\-—]\s*(.+?)(?=(?:РИСК|ФОРМА_Х|ФОРМА_Г|$))",
+                               text, flags=re.IGNORECASE | re.DOTALL),
+        "risks":     re.search(r"РИСК[А-ЯA-ZЁ]*[:\-—]\s*(.+?)(?=(?:ФОРМА_Х|ФОРМА_Г|$))",
+                               text, flags=re.IGNORECASE | re.DOTALL),
+        "home_form": re.search(r"ФОРМА_Х[:\-—]\s*([WDLВНП\s—\-]+)",
+                               text, flags=re.IGNORECASE),
+        "away_form": re.search(r"ФОРМА_Г[:\-—]\s*([WDLВНП\s—\-]+)",
+                               text, flags=re.IGNORECASE),
+    }
+    for key, m in sections.items():
+        if m:
+            out[key] = m.group(1).strip().strip(".,;:") or ""
+    return out
+
+
 async def explain_pick(home: str, away: str, competition: str,
                        pick_label: str, probability: float,
                        book_odds: float, fair_odds: float,
                        extra_context: str = "") -> dict:
-    """Возвращает dict с ключами: reasoning, risks, home_form, away_form."""
-    context_suffix = f"\nДоп. контекст:\n{extra_context}\n" if extra_context else ""
+    """Возвращает dict с ключами: reasoning, risks, home_form, away_form.
+
+    Промпт переписан в стиле живого каппера — свободный текст по секциям,
+    а не сухой JSON. Это даёт более живой комментарий (см. формат поста).
+    """
+    market_prob = 1 / book_odds if book_odds > 1 else 0.0
+    gap = (probability - market_prob) * 100
+    context_suffix = f"\nКонтекст матча:\n{extra_context}\n" if extra_context else ""
+
+    fallback_reasoning = (
+        f"Беру {pick_label}. По модели вероятность {probability:.0%}, "
+        f"бук закладывает ~{market_prob:.0%} — гэп {gap:+.1f} п.п. в нашу пользу. "
+        f"Справедливая цена ~{fair_odds:.2f}, в линии {book_odds:.2f} — это и есть value."
+    )
     fallback = {
-        "reasoning": (
-            f"Модель оценивает вероятность {probability:.0%} против "
-            f"рыночных ~{1/book_odds:.0%}. Это value. "
-            f"{extra_context[:220]}".strip()
-        ),
-        "risks": "Данные о составах и травмах могли не учесть событий последних часов.",
+        "reasoning": fallback_reasoning,
+        "risks": "Состав и кадровые новости последних часов могли не дойти до модели — проверьте линейку перед стартом.",
         "home_form": "— — — — —",
         "away_form": "— — — — —",
     }
@@ -83,30 +113,32 @@ async def explain_pick(home: str, away: str, competition: str,
         return fallback
 
     prompt = (
-        f"Ты футбольный аналитик. Матч: {home} vs {away}, турнир: {competition}.\n"
-        f"Модель выбрала ставку: «{pick_label}».\n"
-        f"Модельная вероятность: {probability:.1%}. "
-        f"Коэффициент букмекера: {book_odds}. Наш fair-odds: {fair_odds}.\n\n"
-        f"{context_suffix}"
-        "Вкратце объясни почему это может быть value-ставка: форма, xG, "
-        "мотивация, домашний/выездной фактор. Укажи 1–2 главных риска.\n\n"
-        "Ответь СТРОГО в JSON без пояснений вне JSON:\n"
-        "{\n"
-        '  "reasoning": "<3-4 предложения — конкретные факты>",\n'
-        '  "risks": "<1-2 риска>",\n'
-        '  "home_form": "<форма хозяев: W/D/L через пробел, 5 игр>",\n'
-        '  "away_form": "<форма гостей: W/D/L через пробел, 5 игр>"\n'
-        "}"
+        f"Ты опытный футбольный каппер. Пишешь как для подписчиков канала — живо, "
+        f"конкретно, без воды, от первого лица.\n\n"
+        f"Матч: {home} — {away}, турнир: {competition}.\n"
+        f"Ставка модели: «{pick_label}».\n"
+        f"Вероятность по модели: {probability:.0%}. Букмекер закладывает ~{market_prob:.0%} "
+        f"(коэф {book_odds:.2f}, наш fair {fair_odds:.2f}, гэп {gap:+.1f} п.п.).\n"
+        f"{context_suffix}\n"
+        "Дай ответ ровно в таком формате (без markdown, заголовки секций обязательны):\n\n"
+        "ПОЧЕМУ:\n"
+        "<2-4 предложения от первого лица — почему берём ставку. Опирайся на форму, xG, "
+        "мотивацию, фактор поля, кадры. Используй жаргон каппера: «бук занижает», "
+        "«противоход», «осторожный заход», но не переборщи. Цифры — конкретные.>\n\n"
+        "РИСКИ:\n"
+        "<1-2 предложения о реальных угрозах ставке — травмы, ротация, история встреч.>\n\n"
+        "ФОРМА_Х: <последние 5 матчей хозяев в формате W D L через пробел>\n"
+        "ФОРМА_Г: <последние 5 матчей гостей в формате W D L через пробел>\n"
     )
     raw = await _gemini_call([{"text": prompt}], timeout_s=30)
-    parsed = _extract_json(raw or "")
-    if not parsed:
+    if not raw:
         return fallback
+    parsed = _parse_capper_text(raw)
     return {
-        "reasoning": parsed.get("reasoning") or fallback["reasoning"],
-        "risks": parsed.get("risks") or fallback["risks"],
-        "home_form": parsed.get("home_form") or fallback["home_form"],
-        "away_form": parsed.get("away_form") or fallback["away_form"],
+        "reasoning": parsed["reasoning"] or fallback["reasoning"],
+        "risks":     parsed["risks"]     or fallback["risks"],
+        "home_form": parsed["home_form"] or fallback["home_form"],
+        "away_form": parsed["away_form"] or fallback["away_form"],
     }
 
 

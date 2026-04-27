@@ -175,7 +175,12 @@ async def _process_match(match: Match, bank: float, strict: bool = True):
         log.info("[no-odds] %s", match.title)
         return None
 
-    home_xg, away_xg = xg_from_odds(odds, match.competition)
+    home_form, away_form = await asyncio.gather(
+        fetch_team_form(match.home),
+        fetch_team_form(match.away),
+    )
+    home_xg, away_xg = xg_from_odds(odds, match.competition,
+                                    home_form, away_form)
     model = poisson_probs(home_xg, away_xg)
 
     pick = best_value_pick(match.home, match.away, odds, model, bank) if strict \

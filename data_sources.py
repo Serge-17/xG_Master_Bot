@@ -10,6 +10,7 @@ import asyncio
 import logging
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -29,8 +30,27 @@ _matches_cache_ts: float = 0.0
 
 # ── Кэш коэффициентов ───────────────────────────────────────────
 # Структура: {sport_key: (timestamp, [events])}
+# TTL динамический: для матчей в течение 90 минут — короткий, иначе длинный.
 _odds_cache: dict[str, tuple[float, list]] = {}
-_ODDS_CACHE_TTL = 1800  # 30 минут
+_ODDS_CACHE_TTL = 1800        # 30 минут (default — для матчей завтра/позже)
+_ODDS_CACHE_TTL_NEAR = 300    # 5 минут (для матчей в ближайшие 90 минут — линия движется)
+
+
+def _cache_ttl_for_sport(events: list) -> int:
+    """Если в выборке есть матч в ближайшие 90 минут — режем TTL."""
+    now_utc = datetime.now(timezone.utc)
+    near_horizon = now_utc + timedelta(minutes=90)
+    for ev in events or []:
+        commence = ev.get("commence_time")
+        if not commence:
+            continue
+        try:
+            kt = datetime.fromisoformat(commence.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if now_utc - timedelta(minutes=15) <= kt <= near_horizon:
+            return _ODDS_CACHE_TTL_NEAR
+    return _ODDS_CACHE_TTL
 
 # ── Кэш формы команд и завершённых матчей ───────────────────────
 _team_form_cache: dict[str, tuple[float, "TeamForm"]] = {}
@@ -204,7 +224,8 @@ async def _fetch_matches_from_odds_cache(days_ahead: int = 1) -> list[Match]:
     async with aiohttp.ClientSession(timeout=timeout) as http:
         for i, sport in enumerate(config.odds_sports):
             cached = _odds_cache.get(sport)
-            if cached and (time.monotonic() - cached[0]) < _ODDS_CACHE_TTL:
+            ttl = _cache_ttl_for_sport(cached[1]) if cached else _ODDS_CACHE_TTL
+            if cached and (time.monotonic() - cached[0]) < ttl:
                 events = cached[1]
             else:
                 if i > 0:
@@ -328,92 +349,158 @@ async def fetch_team_recent_form(team_name: str, limit: int = 5) -> str:
 # Нормализация названий команд
 # ────────────────────────────────────────────────────────────────
 def _normalize_team(name: str) -> str:
-    """Убираем суффиксы FC/SC/AC и т.д., приводим к нижнему регистру."""
+    """Убираем суффиксы FC/SC/AC и т.д., унакцент, приводим к нижнему регистру.
+
+    Unicode-normalize нужен чтобы 'Bayern München' и 'Bayern Munich' давали
+    одинаковую базу 'bayern munchen'.
+    """
     name = name.lower().strip()
-    # Убираем общие суффиксы
+    name = unicodedata.normalize("NFD", name)
+    name = "".join(c for c in name if unicodedata.category(c) != "Mn")
     name = re.sub(
         r"\b(fc|cf|sc|ac|as|rc|afc|bfc|cfc|sv|bk|bv|fk|sk|nk|rcd|ss|gil)\b",
-        "", name
+        "", name,
     )
-    # Убираем скобки и лишние пробелы
     name = re.sub(r"\([^)]*\)", "", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name
 
 
-def _teams_match(a: str, b: str, threshold: float = 0.65) -> bool:
-    """Сравниваем команды с нормализацией."""
+# Префиксы городов / общие слова, которые сами по себе НЕ идентифицируют клуб
+# (Real Madrid vs Real Sociedad, Manchester United vs Manchester City и т.п.)
+_TEAM_STOPWORDS = {
+    "de", "del", "la", "el", "los", "las",
+    "club", "team", "real", "athletic", "atletico", "deportivo",
+    "manchester", "madrid", "milan", "borussia", "bayern",
+}
+
+
+def _teams_match(a: str, b: str, threshold: float = 0.72) -> bool:
+    """Строгое сравнение команд.
+
+    1. Точное совпадение нормализованных строк.
+    2. Подстрока (для длинных названий).
+    3. SequenceMatcher ratio:
+       - ≥ 0.88 — абсолютное доверие (Bayern Munchen/Munich).
+       - 0.72-0.88 — borderline: верифицируем токенами. Если
+         дифференцирующие токены явно разные (united vs city) → False.
+    4. Token check: общие токены при отсутствии конфликтов.
+    """
     x, y = _normalize_team(a), _normalize_team(b)
     if not x or not y:
         return False
-    # Точное вхождение после нормализации
-    if x in y or y in x:
+    if x == y:
         return True
-    # Fuzzy match
+    if min(len(x), len(y)) >= 6 and (x in y or y in x):
+        return True
+
     ratio = SequenceMatcher(None, x, y).ratio()
-    if ratio >= threshold:
+    wx = {w for w in x.split() if len(w) > 3 and w not in _TEAM_STOPWORDS}
+    wy = {w for w in y.split() if len(w) > 3 and w not in _TEAM_STOPWORDS}
+
+    if ratio >= 0.88:
         return True
-    # Проверяем первые слова (Manchester United → manchester united)
-    wx = set(x.split())
-    wy = set(y.split())
+
+    if ratio >= threshold:
+        # Borderline: токены должны хотя бы пересекаться или быть похожими
+        if not wx or not wy:
+            return True  # одна сторона состоит только из стоп-слов — доверяем ratio
+        if wx & wy or wx.issubset(wy) or wy.issubset(wx):
+            return True
+        for tw in wx:
+            for ty in wy:
+                if SequenceMatcher(None, tw, ty).ratio() >= 0.75:
+                    return True
+        return False  # дифференцирующие токены явно разные
+
+    if not wx or not wy:
+        return False
     common = wx & wy
     if len(common) >= 2:
         return True
-    if len(wx) == 1 and len(wy) == 1:
-        return ratio >= 0.8
+    if common and (wx.issubset(wy) or wy.issubset(wx)):
+        return True
     return False
 
 
+def _median(values: list[float]) -> float:
+    vals = sorted(v for v in values if v and v > 1.0)
+    if not vals:
+        return 0.0
+    n = len(vals)
+    return vals[n // 2] if n % 2 else round((vals[n // 2 - 1] + vals[n // 2]) / 2, 3)
+
+
 def _best_odds_from_event(event: dict, home_team: str) -> Odds:
-    o = Odds()
+    """Берёт МЕДИАНУ по букмекерам, а не максимум.
+
+    Старая логика «максимум по каждой стороне» создавала синтетическую
+    линию с минусовой маржой → fair_probs искусственно завышены → fake edge.
+    Медиана даёт стабильную оценку реальной справедливой цены.
+    """
+    h2h_home: list[float] = []
+    h2h_draw: list[float] = []
+    h2h_away: list[float] = []
+    over: list[float] = []
+    under: list[float] = []
+    btts_y: list[float] = []
+    btts_n: list[float] = []
+    bookmakers: list[str] = []
+
     for bk in event.get("bookmakers", []):
+        title = bk.get("title", "")
+        if title:
+            bookmakers.append(title)
         for mk in bk.get("markets", []):
             key = mk.get("key")
-            outcomes = mk.get("outcomes", [])
-            if key == "h2h":
-                for out in outcomes:
-                    price = out.get("price", 0) or 0
-                    name = out.get("name", "")
-                    if _teams_match(name, home_team) and price > o.home:
-                        o.home = price
-                        o.bookmaker = bk.get("title", o.bookmaker)
-                    elif name == "Draw" and price > o.draw:
-                        o.draw = price
-                    elif not _teams_match(name, home_team) and name != "Draw" and price > o.away:
-                        o.away = price
-            elif key == "totals":
-                for out in outcomes:
-                    point = out.get("point")
-                    price = out.get("price", 0) or 0
-                    name = out.get("name", "")
-                    if point == 2.5:
-                        if name == "Over" and price > o.over_2_5:
-                            o.over_2_5 = price
-                        elif name == "Under" and price > o.under_2_5:
-                            o.under_2_5 = price
-            elif key == "btts":
-                for out in outcomes:
-                    price = out.get("price", 0) or 0
-                    name = out.get("name", "").lower()
-                    if name == "yes" and price > o.btts_yes:
-                        o.btts_yes = price
-                    elif name == "no" and price > o.btts_no:
-                        o.btts_no = price
-    return o
+            for out in mk.get("outcomes", []):
+                price = out.get("price", 0) or 0
+                if not price or price <= 1:
+                    continue
+                name = out.get("name", "")
+                if key == "h2h":
+                    if _teams_match(name, home_team):
+                        h2h_home.append(price)
+                    elif name == "Draw":
+                        h2h_draw.append(price)
+                    elif name and name != "Draw":
+                        h2h_away.append(price)
+                elif key == "totals" and out.get("point") == 2.5:
+                    if name == "Over":
+                        over.append(price)
+                    elif name == "Under":
+                        under.append(price)
+                elif key == "btts":
+                    if name.lower() == "yes":
+                        btts_y.append(price)
+                    elif name.lower() == "no":
+                        btts_n.append(price)
+
+    return Odds(
+        home=_median(h2h_home),
+        draw=_median(h2h_draw),
+        away=_median(h2h_away),
+        over_2_5=_median(over),
+        under_2_5=_median(under),
+        btts_yes=_median(btts_y),
+        btts_no=_median(btts_n),
+        bookmaker=", ".join(bookmakers[:3]) if bookmakers else "",
+    )
 
 
 # ────────────────────────────────────────────────────────────────
 # the-odds-api.com — коэффициенты с кэшем
 # ────────────────────────────────────────────────────────────────
 async def _fetch_sport_odds(http: aiohttp.ClientSession, sport: str) -> list:
-    """Загружает все события по одному виду спорта. Использует кэш."""
+    """Загружает все события по одному виду спорта. Использует кэш с
+    динамическим TTL: 5 минут если есть матч в ближайшие 90 минут, иначе 30."""
     global _odds_cache
     now = time.monotonic()
 
-    # Возвращаем из кэша если свежий
     if sport in _odds_cache:
         ts, events = _odds_cache[sport]
-        if now - ts < _ODDS_CACHE_TTL:
+        ttl = _cache_ttl_for_sport(events)
+        if now - ts < ttl:
             return events
 
     url = f"{config.odds_base}/sports/{sport}/odds/"

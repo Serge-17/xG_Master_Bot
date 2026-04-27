@@ -9,7 +9,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -17,6 +17,10 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from data_sources import Odds
+
+
+# sports.ru показывает время в МСК (UTC+3). Конвертим в UTC.
+_MSK_OFFSET_HOURS = 3
 
 
 log = logging.getLogger(__name__)
@@ -79,11 +83,23 @@ async def search_sports_ru_match(home: str, away: str) -> Optional[str]:
 
 
 def _parse_schedule_datetime(time_text: str) -> Optional[datetime]:
+    """sports.ru печатает время в МСК. Конвертируем в UTC.
+
+    Если получившееся UTC-время оказывается раньше «сейчас минус 6 часов»,
+    значит матч уже завтрашний по МСК — добавляем сутки.
+    """
     m = re.match(r"^(\d{2}):(\d{2})$", _norm(time_text))
     if not m:
         return None
-    now = datetime.now(timezone.utc)
-    return now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+    now_utc = datetime.now(timezone.utc)
+    msk_today = now_utc + timedelta(hours=_MSK_OFFSET_HOURS)
+    msk_dt = msk_today.replace(
+        hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0
+    )
+    utc_dt = msk_dt - timedelta(hours=_MSK_OFFSET_HOURS)
+    if utc_dt < now_utc - timedelta(hours=6):
+        utc_dt += timedelta(days=1)
+    return utc_dt
 
 
 async def scrape_sports_ru_matches() -> list[dict]:
@@ -141,30 +157,54 @@ def _extract_decimal_odds(text: str) -> list[float]:
 
 
 def _odds_from_text(page_text: str) -> Optional[Odds]:
+    """Парсим только из блока «Коэффициенты»/«1X2», иначе возвращаем None.
+
+    Старая версия брала первые три числа в диапазоне 1.01-50 из всего HTML —
+    могла подхватить владение мячом, рейтинги или цены билетов. Теперь требуем
+    явные метки П1/X/П2 в окне ±400 символов от ключевого слова.
+    """
     text = _norm(page_text)
-    decimal_odds = _extract_decimal_odds(text)
-    if len(decimal_odds) < 3:
-        return None
 
-    labels = [
-        r"(?:п1|1)\D{0,20}([1-9]\d?(?:[.,]\d{1,2}))",
-        r"(?:x|ничья)\D{0,20}([1-9]\d?(?:[.,]\d{1,2}))",
-        r"(?:п2|2)\D{0,20}([1-9]\d?(?:[.,]\d{1,2}))",
+    # Сначала пытаемся найти блок коэффициентов
+    block_keywords = [
+        "коэффициент", "котировк", "ставк",
+        "линия букмекер", "1x2", "победа", "исход матча",
     ]
-    parsed: list[float] = []
-    for pattern in labels:
-        found = re.search(pattern, text, flags=re.IGNORECASE)
-        parsed.append(float(found.group(1).replace(",", ".")) if found else 0.0)
+    block: Optional[str] = None
+    text_lower = text.lower()
+    for kw in block_keywords:
+        idx = text_lower.find(kw)
+        if idx >= 0:
+            start = max(0, idx - 100)
+            end = min(len(text), idx + 600)
+            block = text[start:end]
+            break
 
-    if sum(1 for x in parsed if x > 1.0) >= 2:
-        return Odds(home=parsed[0], draw=parsed[1], away=parsed[2], bookmaker="sports.ru")
+    haystack = block if block else text[:3000]
 
-    return Odds(
-        home=decimal_odds[0],
-        draw=decimal_odds[1],
-        away=decimal_odds[2],
-        bookmaker="sports.ru",
+    # Требуем явные метки. Ничейный исход обозначается X (или «ничья»).
+    p1 = re.search(
+        r"(?:П1|^1\b|\b1\b\s*[—–-])\s*[:\s]*([1-9](?:\.\d{1,2}|,\d{1,2}))",
+        haystack, flags=re.IGNORECASE,
     )
+    px = re.search(
+        r"(?:\bX\b|ничья|ничь[ая])\s*[:\s]*([1-9](?:\.\d{1,2}|,\d{1,2}))",
+        haystack, flags=re.IGNORECASE,
+    )
+    p2 = re.search(
+        r"(?:П2|\b2\b\s*[—–-])\s*[:\s]*([1-9](?:\.\d{1,2}|,\d{1,2}))",
+        haystack, flags=re.IGNORECASE,
+    )
+
+    def _val(m) -> float:
+        return float(m.group(1).replace(",", ".")) if m else 0.0
+
+    home, draw, away = _val(p1), _val(px), _val(p2)
+    if home > 1.0 and draw > 1.0 and away > 1.0:
+        return Odds(home=home, draw=draw, away=away, bookmaker="sports.ru")
+
+    # Если меток не нашли — возвращаем None, не угадываем по случайным числам
+    return None
 
 
 async def scrape_sports_ru_odds(match_url: str) -> tuple[Optional[Odds], MatchContext]:

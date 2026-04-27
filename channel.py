@@ -1,7 +1,8 @@
 """
 channel.py — публикация прогнозов в Telegram-канал.
 
-Формат поста и кнопки под ним — согласно ТЗ.
+Стиль постов переписан под живого каппера: вступления варьируются,
+сравнение модели с рынком — словами, без 10 квадратиков-шкалы.
 """
 
 from __future__ import annotations
@@ -34,9 +35,47 @@ LEAGUE_TITLES_RU = {
 }
 
 
-def _confidence_bar(pct: int) -> str:
-    filled = round(max(0, min(100, pct)) / 10)
-    return "🟢" * filled + "⬜" * (10 - filled)
+# Варьируемые вступления — выбираем по signal_id, чтобы посты не были одинаковыми
+INTRO_TEMPLATES = [
+    "🎯 <b>Беру в работу</b>",
+    "💡 <b>Зацепил value</b>",
+    "📍 <b>Линия даёт фору</b>",
+    "🔎 <b>Нашёл расхождение</b>",
+    "⚡ <b>Свежий заход</b>",
+]
+
+CONFIDENCE_LABELS = [
+    (0.65, "🔥 высокая"),
+    (0.55, "✅ уверенная"),
+    (0.45, "⚖️ средняя"),
+    (0.0,  "🪙 осторожный заход"),
+]
+
+DISCLAIMER = (
+    "<i>Не реклама и не гарантия — это математическая модель. "
+    "Минус-серия из 3-4 ставок реальна даже на ярком value. "
+    "Банкролл-менеджмент важнее любой отдельной ставки.</i>"
+)
+
+
+def _confidence_label(prob: float) -> str:
+    for threshold, label in CONFIDENCE_LABELS:
+        if prob >= threshold:
+            return label
+    return CONFIDENCE_LABELS[-1][1]
+
+
+def _gap_phrase(model_prob: float, market_prob: float) -> str:
+    gap = (model_prob - market_prob) * 100
+    if market_prob <= 0:
+        return f"моя оценка {model_prob*100:.0f}%"
+    if gap >= 8:
+        return f"рынок {market_prob*100:.0f}%, у меня {model_prob*100:.0f}% — гэп серьёзный, +{gap:.1f} п.п."
+    if gap >= 4:
+        return f"рынок {market_prob*100:.0f}%, у меня {model_prob*100:.0f}% — перевес +{gap:.1f} п.п."
+    if gap >= 0:
+        return f"рынок {market_prob*100:.0f}%, у меня {model_prob*100:.0f}% — небольшой перевес +{gap:.1f} п.п."
+    return f"рынок {market_prob*100:.0f}%, моя оценка {model_prob*100:.0f}% — иду противоходом"
 
 
 def _kickoff_local(match: Match) -> str:
@@ -57,24 +96,27 @@ def _form_ru(form: str) -> str:
 
 
 def format_signal_post(match: Match, pick: Pick, reasoning: str, risks: str,
-                       home_form: str, away_form: str) -> str:
-    confidence_pct = int(round(pick.probability * 100))
+                       home_form: str, away_form: str,
+                       signal_id: int = 0) -> str:
+    intro = INTRO_TEMPLATES[signal_id % len(INTRO_TEMPLATES)]
+    confidence = _confidence_label(pick.probability)
+    market_prob = pick.market_probability if pick.market_probability > 0 \
+        else (1 / pick.book_odds if pick.book_odds > 1 else 0.0)
+    gap_text = _gap_phrase(pick.probability, market_prob)
+
     return (
+        f"{intro}\n"
         f"🏆 <b>{_league_ru(match.competition)}</b>\n"
-        f"⚽ <b>{match.home} — {match.away}</b>\n"
-        f"🕐 {_kickoff_local(match)}\n\n"
-        f"📌 <b>Рекомендуемая ставка:</b> {pick.pick}\n"
-        f"💰 <b>Коэффициент букмекера:</b> {pick.book_odds:.2f}\n"
-        f"🧮 <b>Справедливый коэффициент по модели:</b> {pick.fair_odds:.2f}\n"
-        f"📈 <b>Вероятность по модели:</b> {confidence_pct}% {_confidence_bar(confidence_pct)}\n"
-        f"📊 <b>Преимущество над линией:</b> {pick.edge*100:+.1f}%\n"
-        f"💵 <b>Рекомендуемый размер ставки:</b> {pick.recommended_stake:.0f} ₽\n\n"
-        f"🏠 <b>Форма хозяев:</b> <code>{_form_ru(home_form)}</code>\n"
-        f"✈️ <b>Форма гостей:</b> <code>{_form_ru(away_form)}</code>\n\n"
-        f"🧠 <b>Почему ставка выглядит интересной:</b>\n{reasoning}\n\n"
-        f"⚠️ <b>Риски:</b> {risks}\n\n"
-        f"<i>Это рекомендация на основе модели, не гарантия. "
-        f"Играйте ответственно — ставки связаны с риском потери денег.</i>"
+        f"⚽ <b>{match.home} — {match.away}</b>  ·  🕐 {_kickoff_local(match)}\n\n"
+        f"📌 <b>Ставка:</b> {pick.pick}  @  <b>{pick.book_odds:.2f}</b>\n"
+        f"🧮 <b>Моя цена:</b> {pick.fair_odds:.2f}  ·  <i>{gap_text}</i>\n"
+        f"📈 <b>Уверенность:</b> {confidence}  ({int(round(pick.probability*100))}%)\n"
+        f"💵 <b>Рекомендуемая ставка:</b> {pick.recommended_stake:.0f} ₽\n\n"
+        f"🏠 <b>Хозяева:</b> <code>{_form_ru(home_form)}</code>  "
+        f"·  ✈️ <b>Гости:</b> <code>{_form_ru(away_form)}</code>\n\n"
+        f"🧠 <b>Почему беру:</b>\n{reasoning}\n\n"
+        f"⚠️ <b>Что смущает:</b> {risks}\n\n"
+        f"{DISCLAIMER}"
     )
 
 
@@ -97,7 +139,7 @@ def channel_post_keyboard(signal_id: int) -> InlineKeyboardMarkup:
 
 
 def format_matches_digest(items: list) -> str:
-    lines = ["📅 <b>Матчи сегодня</b>\n"]
+    lines = ["📅 <b>Что играем сегодня</b>\n"]
     for item in items[:12]:
         kickoff = item.kickoff.strftime("%H:%M") if getattr(item, "kickoff", None) else "—:—"
         league = _league_ru(getattr(item, "league", "") or getattr(item, "competition", "") or "—")
@@ -120,7 +162,7 @@ def format_matches_digest(items: list) -> str:
             f"{kickoff} UTC • <i>{league}</i>{odds_line}"
         )
     lines.append(
-        "\n<i>Коэффициенты сохранены в базе и будут обновляться несколько раз в день.</i>"
+        "\n<i>Линию обновляю несколько раз в день. К старту матча цифры могут поехать.</i>"
     )
     return "\n".join(lines)
 
@@ -144,6 +186,7 @@ async def publish_signal(bot: Bot, signal: Signal, match: Match) -> bool:
         risks=signal.risks or "—",
         home_form=signal.home_form or "— — — — —",
         away_form=signal.away_form or "— — — — —",
+        signal_id=signal.id,
     )
 
     try:

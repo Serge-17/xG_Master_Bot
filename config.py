@@ -106,7 +106,9 @@ class Config:
     # Риск-менеджмент
     kelly_cap: float = 0.05
     min_confidence: int = 40
-    min_edge: float = 0.015
+    # min_edge поднят с 1.5% до 3%: при средней EU-маржe 6-8% значения
+    # ниже этого порога — шум модели, не реальный edge.
+    min_edge: float = 0.03
 
     # Расписание (UTC)
     daily_scan_hour: int = 9
@@ -131,6 +133,11 @@ class Config:
             problems.append("FOOTBALL_API_KEY не задан (будут демо-матчи)")
         if not self.odds_api_key:
             problems.append("ODDS_API_KEY не задан (будут демо-коэффициенты)")
+        if "sqlite" in self.database_url:
+            problems.append(
+                "DATABASE_URL указывает на SQLite — на эфемерном диске данные "
+                "теряются при рестарте. Подключите Postgres (Neon/Supabase)."
+            )
         return problems
 
     def summary(self) -> str:
