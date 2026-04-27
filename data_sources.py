@@ -32,6 +32,12 @@ _matches_cache_ts: float = 0.0
 _odds_cache: dict[str, tuple[float, list]] = {}
 _ODDS_CACHE_TTL = 1800  # 30 минут
 
+# ── Кэш формы команд и завершённых матчей ───────────────────────
+_team_form_cache: dict[str, tuple[float, "TeamForm"]] = {}
+_TEAM_FORM_TTL = 6 * 3600
+_finished_matches_cache: dict[str, tuple[float, list[dict]]] = {}
+_FINISHED_MATCHES_TTL = 6 * 3600
+
 
 @dataclass
 class Match:
@@ -160,27 +166,23 @@ async def fetch_team_form(team_name: str, limit: int = 5) -> TeamForm:
     if not config.football_api_key:
         return TeamForm()
 
+    cache_key = _normalize_team(team_name)
+    now = time.monotonic()
+    cached_form = _team_form_cache.get(cache_key)
+    if cached_form and (now - cached_form[0]) < _TEAM_FORM_TTL:
+        return cached_form[1]
+
     headers = {"X-Auth-Token": config.football_api_key}
     timeout = aiohttp.ClientTimeout(total=15)
     all_rows: list[dict] = []
 
     async with aiohttp.ClientSession(timeout=timeout) as http:
         for comp in config.football_competitions:
-            url = f"{config.football_base}/competitions/{comp}/matches"
-            params = {
-                "status": "FINISHED",
-                "dateFrom": (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y-%m-%d"),
-                "dateTo": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            }
-            try:
-                async with http.get(url, headers=headers, params=params) as r:
-                    if r.status != 200:
-                        continue
-                    payload = await r.json()
-            except Exception:
+            payload_matches = await _fetch_finished_matches(http, headers, comp)
+            if not payload_matches:
                 continue
 
-            for match in payload.get("matches", []):
+            for match in payload_matches:
                 home = match.get("homeTeam", {}).get("name", "")
                 away = match.get("awayTeam", {}).get("name", "")
                 if _teams_match(team_name, home) or _teams_match(team_name, away):
@@ -189,7 +191,9 @@ async def fetch_team_form(team_name: str, limit: int = 5) -> TeamForm:
     all_rows.sort(key=lambda m: m.get("utcDate", ""), reverse=True)
     all_rows = all_rows[:limit]
     if not all_rows:
-        return TeamForm()
+        form_obj = TeamForm()
+        _team_form_cache[cache_key] = (time.monotonic(), form_obj)
+        return form_obj
 
     form: list[str] = []
     gf = ga = wins = draws = losses = 0
@@ -225,7 +229,7 @@ async def fetch_team_form(team_name: str, limit: int = 5) -> TeamForm:
                 losses += 1
                 form.append("L")
 
-    return TeamForm(
+    form_obj = TeamForm(
         form=" ".join(form) if form else "— — — — —",
         goals_for=gf,
         goals_against=ga,
@@ -233,6 +237,8 @@ async def fetch_team_form(team_name: str, limit: int = 5) -> TeamForm:
         draws=draws,
         losses=losses,
     )
+    _team_form_cache[cache_key] = (time.monotonic(), form_obj)
+    return form_obj
 
 
 async def fetch_team_recent_form(team_name: str, limit: int = 5) -> str:
@@ -411,6 +417,38 @@ async def warm_odds_cache():
                 await asyncio.sleep(2.0)
             await _fetch_sport_odds(http, sport)
     log.info("Кэш коэффициентов готов")
+
+
+async def _fetch_finished_matches(
+    http: aiohttp.ClientSession,
+    headers: dict[str, str],
+    comp: str,
+) -> list[dict]:
+    now = time.monotonic()
+    cached = _finished_matches_cache.get(comp)
+    if cached and (now - cached[0]) < _FINISHED_MATCHES_TTL:
+        return cached[1]
+
+    url = f"{config.football_base}/competitions/{comp}/matches"
+    params = {
+        "status": "FINISHED",
+        "dateFrom": (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y-%m-%d"),
+        "dateTo": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+    }
+    try:
+        async with http.get(url, headers=headers, params=params) as r:
+            if r.status == 429:
+                log.warning("football-data rate limit на finished/%s", comp)
+                return cached[1] if cached else []
+            if r.status != 200:
+                return cached[1] if cached else []
+            payload = await r.json()
+    except Exception:
+        return cached[1] if cached else []
+
+    matches = payload.get("matches", [])
+    _finished_matches_cache[comp] = (time.monotonic(), matches)
+    return matches
 
 
 async def _enrich_event_odds(http: aiohttp.ClientSession, event: dict, odds: Odds) -> None:
