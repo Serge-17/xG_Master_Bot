@@ -76,7 +76,9 @@ async def _init_bot():
 
     # Telegram
     from bot import build_application
-    tg_app = build_application(config.telegram_token)
+    import os
+    proxy = os.getenv("TG_PROXY", "")
+    tg_app = build_application(config.telegram_token, proxy=proxy)
 
     for attempt in range(1, 6):
         try:
