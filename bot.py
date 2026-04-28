@@ -67,8 +67,12 @@ LEAGUE_EMOJI = {
     "Eredivisie": "🇳🇱",
     "Championship": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
     "Primeira Liga": "🇵🇹",
+    "UEFA Champions League": "🏆",
     "Champions League": "🏆",
-    "Europa League": "🌍",
+    "UEFA Europa League": "🥈",
+    "Europa League": "🥈",
+    "UEFA Europa Conference League": "🥉",
+    "Conference League": "🥉",
     "World Cup": "🌎",
     "Euro": "🇪🇺",
 }
@@ -83,6 +87,12 @@ LEAGUE_TITLES_RU = {
     "Eredivisie": "Нидерланды. Эредивизи",
     "Primeira Liga": "Португалия. Примейра",
     "Championship": "Англия. Чемпионшип",
+    "UEFA Champions League": "Лига чемпионов УЕФА",
+    "Champions League": "Лига чемпионов УЕФА",
+    "UEFA Europa League": "Лига Европы УЕФА",
+    "Europa League": "Лига Европы УЕФА",
+    "UEFA Europa Conference League": "Лига конференций УЕФА",
+    "Conference League": "Лига конференций УЕФА",
 }
 
 def league_emoji(name: str) -> str:
@@ -413,26 +423,46 @@ async def _show_signals(q, user_id: int):
         )
         return
 
-    lines = ["🔮 <b>Что беру сегодня</b>\n"]
-    for g in guesses:
+    lines = ["🔮 <b>Что беру сегодня</b>"]
+    for g in guesses[:3]:
         m = g["match"]
         p = g["pick"]
+        model = g.get("model") or {}
         emoji = league_emoji(m.competition)
-        ts = _fmt_msk(m.utc_date)
+        ts = _fmt_msk(m.utc_date) if m.utc_date else ""
         market_prob = p.market_probability if p.market_probability > 0 \
             else (1 / p.book_odds if p.book_odds > 1 else 0.0)
         gap = (p.probability - market_prob) * 100
-        lines += [
-            f"\n{emoji} <b>{league_title_ru(m.competition)}</b>",
-            f"⚽ <b>{m.home} — {m.away}</b>  ·  {ts}",
-            f"📌 <b>{p.pick}</b>  @  <b>{p.book_odds:.2f}</b>  "
-            f"(моя цена {p.fair_odds:.2f})",
-            f"📈 рынок {market_prob*100:.0f}%, моя оценка {p.probability*100:.0f}% "
+        block = [
+            "",
+            f"{emoji} <b>{league_title_ru(m.competition)}</b>",
+            f"⚽ <b>{m.home} — {m.away}</b>  ·  🕐 {ts}",
+            "",
+            f"📌 <b>Беру:</b> {p.pick}",
+            f"💰 <b>Коэф букмекера:</b> {p.book_odds:.2f}",
+            f"🧮 <b>Моя цена:</b> {p.fair_odds:.2f}",
+            f"📊 <b>Преимущество:</b> {p.edge*100:+.1f}%  ·  "
+            f"📈 рынок {market_prob*100:.0f}% → модель {p.probability*100:.0f}% "
             f"({gap:+.1f} п.п.)",
-            "─" * 25,
+            f"💵 <b>Размер ставки:</b> {p.recommended_stake:.0f} ₽",
         ]
+        if model:
+            block += [
+                "",
+                "📈 <b>Раскладка модели:</b>",
+                f"   П1 <b>{model['home']*100:.0f}%</b>  ·  "
+                f"Х <b>{model['draw']*100:.0f}%</b>  ·  "
+                f"П2 <b>{model['away']*100:.0f}%</b>",
+                f"   ТБ 2.5 <b>{model['over_2_5']*100:.0f}%</b>  ·  "
+                f"ТМ 2.5 <b>{model['under_2_5']*100:.0f}%</b>",
+                f"   BTTS Да <b>{model['btts_yes']*100:.0f}%</b>  ·  "
+                f"Нет <b>{model['btts_no']*100:.0f}%</b>",
+            ]
+        block.append("─" * 25)
+        lines += block
 
-    lines.append(f"\n{DISCLAIMER}")
+    lines.append("")
+    lines.append(DISCLAIMER)
     await q.message.edit_text(
         "\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=back_button()
     )
@@ -599,21 +629,26 @@ async def _analyze_match(q, ctx, user_id: int):
         stake = pick.recommended_stake
         lines = [
             f"{emoji} <b>{league_title_ru(match.competition)}</b>",
-            f"⚽ <b>{match.home} — {match.away}</b>  ·  🕐 {ts}",
+            f"⚽ <b>{match.home} — {match.away}</b>",
+            f"🕐 {ts}",
             "",
-            f"📌 <b>Беру:</b> {pick.pick}  @  <b>{pick.book_odds:.2f}</b>",
-            f"🧮 <b>Моя цена:</b> {pick.fair_odds:.2f}  ·  "
-            f"рынок {market_prob*100:.0f}%, моя оценка {pick.probability*100:.0f}% "
+            f"📌 <b>Беру:</b> {pick.pick}",
+            f"💰 <b>Коэффициент букмекера:</b> {pick.book_odds:.2f}",
+            f"🧮 <b>Моя цена по модели:</b> {pick.fair_odds:.2f}",
+            f"📊 <b>Преимущество над линией:</b> {pick.edge*100:+.1f}%",
+            f"🎯 <b>Вероятность по модели:</b> {int(round(pick.probability*100))}%",
+            f"📈 <b>Рынок vs модель:</b> {market_prob*100:.0f}% → {pick.probability*100:.0f}% "
             f"({gap:+.1f} п.п.)",
-            f"📈 <b>Уверенность:</b> {confidence_word}",
-            f"💵 <b>Размер ставки:</b> {stake:.0f} ₽",
+            f"💵 <b>Размер ставки:</b> {stake:.0f} ₽  ·  <i>{confidence_word}</i>",
             "",
-            "📊 <b>Раскладка модели:</b>",
-            f"   П1 {model['home']*100:.0f}%  ·  Х {model['draw']*100:.0f}%  ·  "
-            f"П2 {model['away']*100:.0f}%",
-            f"   ТБ 2.5 {model['over_2_5']*100:.0f}%  ·  "
-            f"ТМ 2.5 {model['under_2_5']*100:.0f}%  ·  "
-            f"BTTS-Да {model['btts_yes']*100:.0f}%",
+            "📈 <b>Раскладка модели:</b>",
+            f"   Победа хозяев: <b>{model['home']*100:.0f}%</b>",
+            f"   Ничья: <b>{model['draw']*100:.0f}%</b>",
+            f"   Победа гостей: <b>{model['away']*100:.0f}%</b>",
+            f"   Тотал больше 2.5: <b>{model['over_2_5']*100:.0f}%</b>",
+            f"   Тотал меньше 2.5: <b>{model['under_2_5']*100:.0f}%</b>",
+            f"   Обе забьют — Да: <b>{model['btts_yes']*100:.0f}%</b>",
+            f"   Обе забьют — Нет: <b>{model['btts_no']*100:.0f}%</b>",
         ]
 
         if meta.get("reasoning"):
@@ -623,10 +658,11 @@ async def _analyze_match(q, ctx, user_id: int):
         if cached:
             lines += [
                 "",
-                f"🏠 Хозяева: <code>{form_ru(getattr(cached, 'home_form', '— — — — —'))}</code>  "
-                f"·  ✈️ Гости: <code>{form_ru(getattr(cached, 'away_form', '— — — — —'))}</code>",
-                f"🩺 Кадры: {_render_cached_list(getattr(cached, 'injuries', '[]'), 2)}",
-                f"📌 Факты: {_render_cached_list(getattr(cached, 'facts', '[]'), 2)}",
+                f"🏠 <b>Форма хозяев:</b> <code>{form_ru(getattr(cached, 'home_form', '— — — — —'))}</code>",
+                f"✈️ <b>Форма гостей:</b> <code>{form_ru(getattr(cached, 'away_form', '— — — — —'))}</code>",
+                f"🩺 <b>Кадры/травмы:</b> {_render_cached_list(getattr(cached, 'injuries', '[]'), 3)}",
+                f"📌 <b>Факты:</b> {_render_cached_list(getattr(cached, 'facts', '[]'), 3)}",
+                f"📊 <b>Статистика:</b> {_render_cached_list(getattr(cached, 'stats', '[]'), 3)}",
             ]
 
         lines += ["", DISCLAIMER]
@@ -923,22 +959,35 @@ async def _send_personal_signals(ctx, chat_id: int, user_id: int):
     for g in guesses[:3]:
         m = g["match"]
         p = g["pick"]
+        model = g.get("model") or {}
         emoji = league_emoji(m.competition)
         ts = _fmt_msk(m.utc_date) if m.utc_date else ""
         market_prob = p.market_probability if p.market_probability > 0 \
             else (1 / p.book_odds if p.book_odds > 1 else 0.0)
         gap = (p.probability - market_prob) * 100
         lines = [
-            f"{emoji} <b>{m.competition}</b>",
-            f"⚽ <b>{m.home} — {m.away}</b>  ·  {ts}",
-            f"📌 <b>{p.pick}</b>  @  <b>{p.book_odds:.2f}</b>  "
-            f"(моя цена {p.fair_odds:.2f})",
-            f"📈 рынок {market_prob*100:.0f}%, у меня {p.probability*100:.0f}% "
-            f"({gap:+.1f} п.п.)",
-            f"💵 Размер ставки: <b>{p.recommended_stake:.0f} ₽</b>",
+            f"{emoji} <b>{league_title_ru(m.competition)}</b>",
+            f"⚽ <b>{m.home} — {m.away}</b>  ·  🕐 {ts}",
             "",
-            DISCLAIMER,
+            f"📌 <b>Беру:</b> {p.pick}",
+            f"💰 <b>Коэф букмекера:</b> {p.book_odds:.2f}",
+            f"🧮 <b>Моя цена:</b> {p.fair_odds:.2f}",
+            f"📊 <b>Преимущество над линией:</b> {p.edge*100:+.1f}%",
+            f"📈 рынок {market_prob*100:.0f}% → модель {p.probability*100:.0f}% "
+            f"({gap:+.1f} п.п.)",
+            f"💵 <b>Размер ставки:</b> {p.recommended_stake:.0f} ₽",
         ]
+        if model:
+            lines += [
+                "",
+                "📈 <b>Раскладка модели:</b>",
+                f"   П1 <b>{model['home']*100:.0f}%</b>  ·  "
+                f"Х <b>{model['draw']*100:.0f}%</b>  ·  "
+                f"П2 <b>{model['away']*100:.0f}%</b>",
+                f"   ТБ 2.5 <b>{model['over_2_5']*100:.0f}%</b>  ·  "
+                f"BTTS Да <b>{model['btts_yes']*100:.0f}%</b>",
+            ]
+        lines += ["", DISCLAIMER]
         await ctx.bot.send_message(
             chat_id, "\n".join(lines),
             parse_mode=ParseMode.HTML, reply_markup=main_menu()

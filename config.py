@@ -93,6 +93,9 @@ class Config:
     )
 
     odds_sports: tuple = (
+        "soccer_uefa_champs_league",
+        "soccer_uefa_europa_league",
+        "soccer_uefa_europa_conference_league",
         "soccer_epl",
         "soccer_spain_la_liga",
         "soccer_germany_bundesliga",

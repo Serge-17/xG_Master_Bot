@@ -44,6 +44,13 @@ LEAGUE_XG_PRIORS: dict[str, tuple[float, float]] = {
     "primeira liga": (1.40, 1.05),
     "championship": (1.35, 1.10),
     "efl championship": (1.35, 1.10),
+    # UEFA — выше домашний фактор, чуть выше тотал
+    "uefa champions league": (1.60, 1.20),
+    "champions league": (1.60, 1.20),
+    "uefa europa league": (1.50, 1.10),
+    "europa league": (1.50, 1.10),
+    "uefa europa conference league": (1.55, 1.15),
+    "conference league": (1.55, 1.15),
     "default": (1.45, 1.10),
 }
 

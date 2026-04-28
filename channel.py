@@ -7,8 +7,10 @@ channel.py — публикация прогнозов в Telegram-канал.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 
 # Время матчей показываем по Москве (UTC+3)
@@ -36,6 +38,12 @@ LEAGUE_TITLES_RU = {
     "Eredivisie": "Нидерланды. Эредивизи",
     "Primeira Liga": "Португалия. Примейра",
     "Championship": "Англия. Чемпионшип",
+    "UEFA Champions League": "Лига чемпионов УЕФА",
+    "Champions League": "Лига чемпионов УЕФА",
+    "UEFA Europa League": "Лига Европы УЕФА",
+    "Europa League": "Лига Европы УЕФА",
+    "UEFA Europa Conference League": "Лига конференций УЕФА",
+    "Conference League": "Лига конференций УЕФА",
 }
 
 
@@ -103,27 +111,63 @@ def _form_ru(form: str) -> str:
 
 def format_signal_post(match: Match, pick: Pick, reasoning: str, risks: str,
                        home_form: str, away_form: str,
-                       signal_id: int = 0) -> str:
+                       signal_id: int = 0,
+                       model: Optional[dict] = None,
+                       injuries: Optional[list[str]] = None,
+                       facts: Optional[list[str]] = None) -> str:
     intro = INTRO_TEMPLATES[signal_id % len(INTRO_TEMPLATES)]
     confidence = _confidence_label(pick.probability)
     market_prob = pick.market_probability if pick.market_probability > 0 \
         else (1 / pick.book_odds if pick.book_odds > 1 else 0.0)
     gap_text = _gap_phrase(pick.probability, market_prob)
 
-    return (
-        f"{intro}\n"
-        f"🏆 <b>{_league_ru(match.competition)}</b>\n"
-        f"⚽ <b>{match.home} — {match.away}</b>  ·  🕐 {_kickoff_local(match)}\n\n"
-        f"📌 <b>Ставка:</b> {pick.pick}  @  <b>{pick.book_odds:.2f}</b>\n"
-        f"🧮 <b>Моя цена:</b> {pick.fair_odds:.2f}  ·  <i>{gap_text}</i>\n"
-        f"📈 <b>Уверенность:</b> {confidence}  ({int(round(pick.probability*100))}%)\n"
-        f"💵 <b>Рекомендуемая ставка:</b> {pick.recommended_stake:.0f} ₽\n\n"
-        f"🏠 <b>Хозяева:</b> <code>{_form_ru(home_form)}</code>  "
-        f"·  ✈️ <b>Гости:</b> <code>{_form_ru(away_form)}</code>\n\n"
-        f"🧠 <b>Почему беру:</b>\n{reasoning}\n\n"
-        f"⚠️ <b>Что смущает:</b> {risks}\n\n"
-        f"{DISCLAIMER}"
-    )
+    blocks = [
+        f"{intro}",
+        f"🏆 <b>{_league_ru(match.competition)}</b>",
+        f"⚽ <b>{match.home} — {match.away}</b>",
+        f"🕐 {_kickoff_local(match)}",
+        "",
+        f"📌 <b>Ставка:</b> {pick.pick}",
+        f"💰 <b>Коэффициент букмекера:</b> {pick.book_odds:.2f}",
+        f"🧮 <b>Моя цена по модели:</b> {pick.fair_odds:.2f}",
+        f"📊 <b>Преимущество над линией:</b> {pick.edge*100:+.1f}%",
+        f"🎯 <b>Вероятность по модели:</b> {int(round(pick.probability*100))}%  ·  "
+        f"<i>{confidence}</i>",
+        f"📈 <i>{gap_text}</i>",
+        f"💵 <b>Рекомендуемая ставка:</b> {pick.recommended_stake:.0f} ₽",
+    ]
+
+    if model:
+        blocks += [
+            "",
+            "📈 <b>Раскладка модели:</b>",
+            f"   Победа хозяев: <b>{model['home']*100:.0f}%</b>",
+            f"   Ничья: <b>{model['draw']*100:.0f}%</b>",
+            f"   Победа гостей: <b>{model['away']*100:.0f}%</b>",
+            f"   Тотал больше 2.5: <b>{model['over_2_5']*100:.0f}%</b>",
+            f"   Тотал меньше 2.5: <b>{model['under_2_5']*100:.0f}%</b>",
+            f"   Обе забьют — Да: <b>{model['btts_yes']*100:.0f}%</b>",
+            f"   Обе забьют — Нет: <b>{model['btts_no']*100:.0f}%</b>",
+        ]
+
+    blocks += [
+        "",
+        f"🧠 <b>Почему беру:</b>",
+        reasoning,
+        "",
+        f"⚠️ <b>Что смущает:</b> {risks}",
+        "",
+        f"🏠 <b>Форма хозяев:</b> <code>{_form_ru(home_form)}</code>",
+        f"✈️ <b>Форма гостей:</b> <code>{_form_ru(away_form)}</code>",
+    ]
+
+    if injuries:
+        blocks.append(f"🩺 <b>Кадры/травмы:</b> {', '.join(injuries[:3])}")
+    if facts:
+        blocks.append(f"📌 <b>Факты:</b> {', '.join(facts[:3])}")
+
+    blocks += ["", DISCLAIMER]
+    return "\n".join(blocks)
 
 
 def channel_post_keyboard(signal_id: int) -> InlineKeyboardMarkup:
@@ -179,7 +223,21 @@ def format_matches_digest(items: list) -> str:
     return "\n".join(lines)
 
 
-async def publish_signal(bot: Bot, signal: Signal, match: Match) -> bool:
+def _list_from_cached_field(raw) -> list[str]:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return raw
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+async def publish_signal(bot: Bot, signal: Signal, match: Match,
+                         model: Optional[dict] = None,
+                         cached: object = None) -> bool:
     """Публикует сигнал в CHANNEL_ID. При успехе сохраняет message_id в БД."""
     if not config.channel_id:
         log.info("CHANNEL_ID не задан — публикация в канал пропущена (signal #%d)",
@@ -192,6 +250,9 @@ async def publish_signal(bot: Bot, signal: Signal, match: Match) -> bool:
         fair_odds=signal.fair_odds, edge=signal.edge,
         recommended_stake=signal.recommended_stake,
     )
+    injuries = _list_from_cached_field(getattr(cached, "injuries", None))
+    facts = _list_from_cached_field(getattr(cached, "facts", None))
+
     text = format_signal_post(
         match, pick_obj,
         reasoning=signal.reasoning or "—",
@@ -199,6 +260,9 @@ async def publish_signal(bot: Bot, signal: Signal, match: Match) -> bool:
         home_form=signal.home_form or "— — — — —",
         away_form=signal.away_form or "— — — — —",
         signal_id=signal.id,
+        model=model,
+        injuries=injuries,
+        facts=facts,
     )
 
     try:

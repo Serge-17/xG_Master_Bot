@@ -189,13 +189,14 @@ async def _process_match(match: Match, bank: float, strict: bool = True):
     return (pick, odds, model, cached) if pick else None
 
 
-async def scan_and_build_signals(bank: float, limit: int = 25) -> list[tuple[int, Match]]:
+async def scan_and_build_signals(bank: float, limit: int = 25
+                                 ) -> list[tuple[int, Match, dict, object]]:
     matches = await fetch_matches()
     if not matches:
         log.info("Матчи не найдены")
         return []
 
-    results: list[tuple[int, Match]] = []
+    results: list[tuple[int, Match, dict, object]] = []
     for match in matches[:limit]:
         if len(results) >= config.max_signals_per_day:
             break
@@ -228,7 +229,7 @@ async def scan_and_build_signals(bank: float, limit: int = 25) -> list[tuple[int
             away_form=getattr(cached, "away_form", meta["away_form"]) or meta["away_form"],
             recommended_stake=pick.recommended_stake,
         )
-        results.append((signal_id, match))
+        results.append((signal_id, match, model, cached))
         await asyncio.sleep(2)
 
     return results
@@ -267,8 +268,9 @@ async def scan_and_publish(bot: Bot, bank: float) -> int:
     async with _scan_lock:
         signals = await scan_and_build_signals(bank)
         published = 0
-        for signal_id, match in signals:
+        for signal_id, match, model, cached in signals:
             sig = await get_signal(signal_id)
-            if sig and await publish_signal(bot, sig, match):
+            if sig and await publish_signal(bot, sig, match,
+                                            model=model, cached=cached):
                 published += 1
         return published
