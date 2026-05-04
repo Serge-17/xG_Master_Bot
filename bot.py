@@ -46,12 +46,16 @@ from channel import DISCLAIMER as CAPPER_DISCLAIMER, format_signal_post, publish
 from config import config
 from data_sources import Match, fetch_matches, fetch_odds, fetch_team_form
 from db import (
-    add_bet, close_bet, ensure_user, find_signal_by_match, get_bank,
+    add_bet, aggregate_signal_breakdown, aggregate_signal_stats, close_bet,
+    ensure_user, find_signal_by_match, get_bank,
     get_cached_match, get_settings, get_signal, list_cached_matches_for_date,
     list_signals, list_todays_signals,
-    retro_report, save_signal, set_bank, stats_for_user, update_settings,
+    retro_report, save_signal, set_bank,
+    settled_signals_for_msk_date, settled_signals_in_range,
+    stats_for_user, update_settings,
 )
 from scanner import _prepare_match_cache, scan_and_publish, warmup_match_cache
+from settlement import manual_settle
 
 log = logging.getLogger(__name__)
 
@@ -217,6 +221,54 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id, f"❌ Скан упал: {e}")
 
 
+async def cmd_settle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Ручной override результата сигнала.
+    /settle <signal_id> <win|loss|void> [home_goals:away_goals]
+    Доступно только ADMIN_ID.
+    """
+    user_id = update.effective_user.id
+    if not config.admin_id or user_id != config.admin_id:
+        await update.message.reply_text("Команда доступна только админу.")
+        return
+    args = ctx.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Использование: <code>/settle 42 win</code> "
+            "или <code>/settle 42 win 2:1</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    try:
+        signal_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("signal_id должен быть числом.")
+        return
+    verdict = args[1].lower()
+    if verdict not in ("win", "loss", "void"):
+        await update.message.reply_text("verdict ∈ {win, loss, void}")
+        return
+    home_goals = away_goals = None
+    if len(args) >= 3 and ":" in args[2]:
+        try:
+            h, a = args[2].split(":", 1)
+            home_goals = int(h)
+            away_goals = int(a)
+        except ValueError:
+            await update.message.reply_text("Счёт в формате 2:1")
+            return
+    sig = await get_signal(signal_id)
+    if not sig:
+        await update.message.reply_text(f"Сигнал #{signal_id} не найден.")
+        return
+    await manual_settle(sig, verdict, home_goals=home_goals, away_goals=away_goals)
+    score = f" ({home_goals}:{away_goals})" if home_goals is not None else ""
+    await update.message.reply_text(
+        f"✅ Сигнал #{signal_id} закрыт как <b>{verdict}</b>{score}",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def cmd_find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = " ".join(ctx.args or []).strip()
     if not query:
@@ -316,8 +368,22 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         idx = int(data.split("_", 1)[1])
         await _analyze_match(q, ctx, user.id); return
 
-    # ── Ретро-отчёт
+    # ── Ретро-отчёт: главное меню
     if data == "menu_retro":
+        await _show_retro_menu(q); return
+    if data == "retro_yesterday":
+        await _show_retro_yesterday(q); return
+    if data == "retro_period_7":
+        await _show_retro_period(q, days=7); return
+    if data == "retro_period_30":
+        await _show_retro_period(q, days=30); return
+    if data == "retro_markets":
+        await _show_retro_breakdown(q, group_by="market"); return
+    if data == "retro_leagues":
+        await _show_retro_breakdown(q, group_by="league"); return
+    if data == "retro_clv":
+        await _show_retro_clv(q); return
+    if data == "retro_mybets":
         await _show_retro(q, user.id); return
 
     # ── Детали сигнала
@@ -685,16 +751,201 @@ async def _analyze_match(q, ctx, user_id: int):
 
 
 # ── Ретро-отчёт ──────────────────────────────────────────────────
+_VERDICT_ICON = {"win": "✅", "loss": "❌", "void": "➖"}
+
+
+def _retro_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Вчера",       callback_data="retro_yesterday")],
+        [
+            InlineKeyboardButton("📆 7 дней",   callback_data="retro_period_7"),
+            InlineKeyboardButton("🗓 30 дней",  callback_data="retro_period_30"),
+        ],
+        [
+            InlineKeyboardButton("🏆 По рынкам", callback_data="retro_markets"),
+            InlineKeyboardButton("🌍 По лигам",  callback_data="retro_leagues"),
+        ],
+        [InlineKeyboardButton("📐 CLV-трекинг",  callback_data="retro_clv")],
+        [InlineKeyboardButton("💼 Мои ставки",   callback_data="retro_mybets")],
+        [InlineKeyboardButton("◀ В меню",        callback_data="back_menu")],
+    ])
+
+
+def _retro_back_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("◀ К отчётам", callback_data="menu_retro")],
+        [InlineKeyboardButton("◀ В меню",    callback_data="back_menu")],
+    ])
+
+
+def _format_settled_line(s) -> str:
+    icon = _VERDICT_ICON.get(s.status, "•")
+    score = s.result_score or "—:—"
+    pnl = float(s.pnl_units or 0)
+    pnl_txt = f"{pnl:+.2f}u" if s.status != "void" else "возврат"
+    return (
+        f"{icon} <b>{s.match}</b> · {s.pick} @{s.book_odds:.2f} · "
+        f"{score} · {pnl_txt}"
+    )
+
+
+def _format_agg_footer(agg: dict) -> list[str]:
+    if not agg or agg.get("total", 0) == 0:
+        return []
+    decided = agg.get("decided", 0)
+    score_line = f"{agg['wins']}/{decided}" if decided else "—"
+    void_chunk = f" · ➖{agg['voids']}" if agg.get("voids") else ""
+    lines = [
+        "",
+        f"<b>Итого:</b> {score_line}{void_chunk} · "
+        f"ROI {agg['roi_pct']:+.1f}% · "
+        f"банк {agg['pnl_units']:+.2f}u",
+    ]
+    if agg.get("clv_sample"):
+        lines.append(f"📐 CLV {agg['clv_pct']:+.2f}% (n={agg['clv_sample']})")
+    if agg.get("decided"):
+        lines.append(f"🎯 Винрейт: {agg['win_rate_pct']:.1f}% · "
+                     f"средн. кэф {agg['avg_odds']:.2f}")
+    return lines
+
+
+async def _show_retro_menu(q):
+    body = (
+        "📖 <b>Ретро-отчёт</b>\n\n"
+        "Здесь видно, как сыграли сигналы из канала и твои собственные ставки.\n\n"
+        "• <b>Вчера / 7д / 30д</b> — итог по канальным сигналам\n"
+        "• <b>По рынкам / По лигам</b> — где модель работает лучше\n"
+        "• <b>CLV-трекинг</b> — самое честное мерило эджа\n"
+        "• <b>Мои ставки</b> — твоя история закрытых ставок"
+    )
+    await q.message.edit_text(body, parse_mode=ParseMode.HTML,
+                               reply_markup=_retro_menu_kb())
+
+
+async def _show_retro_yesterday(q):
+    msk = MSK_TZ
+    yday = (datetime.now(msk) - timedelta(days=1)).date()
+    sigs = await settled_signals_for_msk_date(yday)
+    date_str = yday.strftime("%d.%m.%Y")
+    if not sigs:
+        body = (
+            f"📅 <b>Отчёт за {date_str}</b>\n\n"
+            "<i>Сигналов в этот день не было — модель не нашла value, "
+            "или они ещё в процессе расчёта.</i>"
+        )
+    else:
+        lines = [f"📅 <b>Отчёт за {date_str}</b>", ""]
+        for s in sigs:
+            lines.append(_format_settled_line(s))
+        lines += _format_agg_footer(aggregate_signal_stats(sigs))
+        body = "\n".join(lines)
+    await q.message.edit_text(body, parse_mode=ParseMode.HTML,
+                               reply_markup=_retro_back_kb())
+
+
+async def _show_retro_period(q, days: int):
+    sigs = await settled_signals_in_range(days)
+    if not sigs:
+        body = (
+            f"🗓 <b>Последние {days} дней</b>\n\n"
+            "<i>Закрытых сигналов нет — либо стартовала фича только что, "
+            "либо модель пропустила период.</i>"
+        )
+    else:
+        agg = aggregate_signal_stats(sigs)
+        lines = [
+            f"🗓 <b>Последние {days} дней</b>",
+            "",
+            f"📊 Сигналов: <b>{agg['total']}</b>"
+            + (f" (➖{agg['voids']} возврат)" if agg['voids'] else ""),
+            f"✅ Зашло: <b>{agg['wins']}</b>"
+            f"   ❌ Не зашло: <b>{agg['losses']}</b>",
+            f"📈 Винрейт: <b>{agg['win_rate_pct']:.1f}%</b>"
+            f"   ROI: <b>{agg['roi_pct']:+.1f}%</b>",
+            f"💼 Банк: <b>{agg['pnl_units']:+.2f}u</b>"
+            f"   средний кэф: <b>{agg['avg_odds']:.2f}</b>",
+        ]
+        if agg["clv_sample"]:
+            lines.append(
+                f"📐 CLV: <b>{agg['clv_pct']:+.2f}%</b> (n={agg['clv_sample']})"
+            )
+        # Последние 8 сигналов как сэмпл
+        lines += ["", "<b>Последние сигналы:</b>"]
+        for s in sigs[-8:][::-1]:
+            lines.append(_format_settled_line(s))
+        body = "\n".join(lines)
+    await q.message.edit_text(body, parse_mode=ParseMode.HTML,
+                               reply_markup=_retro_back_kb())
+
+
+async def _show_retro_breakdown(q, group_by: str):
+    rows = await aggregate_signal_breakdown(days=30, group_by=group_by)
+    title = "🏆 По рынкам (30 дней)" if group_by == "market" else "🌍 По лигам (30 дней)"
+    if not rows:
+        body = f"<b>{title}</b>\n\n<i>Закрытых сигналов за 30 дней нет.</i>"
+    else:
+        lines = [f"<b>{title}</b>", ""]
+        for row in rows[:10]:
+            label = league_title_ru(row["key"]) if group_by == "league" else row["key"]
+            decided = row["decided"]
+            score = f"{row['wins']}/{decided}" if decided else "—"
+            tail = ""
+            if row.get("clv_sample"):
+                tail = f" · CLV {row['clv_pct']:+.2f}%"
+            lines.append(
+                f"• <b>{label}</b>: {row['total']} сигн · {score} · "
+                f"ROI {row['roi_pct']:+.1f}% · "
+                f"банк {row['pnl_units']:+.2f}u{tail}"
+            )
+        body = "\n".join(lines)
+    await q.message.edit_text(body, parse_mode=ParseMode.HTML,
+                               reply_markup=_retro_back_kb())
+
+
+async def _show_retro_clv(q):
+    sigs = await settled_signals_in_range(days=30)
+    pairs = [
+        s for s in sigs
+        if s.book_odds and s.closing_odds and s.closing_odds > 1.01
+    ]
+    if not pairs:
+        body = (
+            "📐 <b>CLV-трекинг</b>\n\n"
+            "<i>Пока нет ни одного сигнала с закрывающим коэф. — "
+            "снэпшоты делаются за 30 минут до старта матчей.</i>\n\n"
+            "CLV (Closing Line Value) — самое честное мерило эджа на длинной "
+            "дистанции. Винрейт лжёт на коротких выборках, CLV — нет."
+        )
+    else:
+        diffs = [(s.book_odds / s.closing_odds - 1) * 100 for s in pairs]
+        avg = sum(diffs) / len(diffs)
+        wins = sum(1 for d in diffs if d > 0)
+        losses = sum(1 for d in diffs if d < 0)
+        lines = [
+            "📐 <b>CLV-трекинг (30 дней)</b>",
+            "",
+            f"📊 Сэмпл: <b>{len(pairs)}</b> сигналов",
+            f"📈 Средний CLV: <b>{avg:+.2f}%</b>",
+            f"✅ Линию обыграл: <b>{wins}</b>   ❌ проиграл: <b>{losses}</b>",
+            "",
+            "<i>Положительный CLV = модель ловила цену лучше рынка к старту. "
+            "Это и есть истинный edge.</i>",
+        ]
+        body = "\n".join(lines)
+    await q.message.edit_text(body, parse_mode=ParseMode.HTML,
+                               reply_markup=_retro_back_kb())
+
+
 async def _show_retro(q, user_id: int):
     bets = await retro_report(user_id, limit=15)
     if not bets:
         body = (
-            "📖 <b>История пока пустая</b>\n\n"
+            "💼 <b>Мои ставки — пусто</b>\n\n"
             "Когда закроешь первую ставку (через 📤 «Загрузить чек» или вручную) — "
             "здесь появится разбор: что сыграло, что нет, какой ROI."
         )
     else:
-        lines = ["📖 <b>Последние закрытые ставки</b>\n"]
+        lines = ["💼 <b>Мои последние закрытые ставки</b>\n"]
         total_profit = 0.0
         for b in bets:
             icon = {"win": "✅", "loss": "❌", "void": "↩️"}.get(b.status, "•")
@@ -707,7 +958,8 @@ async def _show_retro(q, user_id: int):
         sign = "📈" if total_profit >= 0 else "📉"
         lines.append(f"\n{sign} <b>Итого по этим ставкам: {total_profit:+.0f} ₽</b>")
         body = "\n".join(lines)
-    await q.message.edit_text(body, parse_mode=ParseMode.HTML, reply_markup=back_button())
+    await q.message.edit_text(body, parse_mode=ParseMode.HTML,
+                               reply_markup=_retro_back_kb())
 
 
 # ── Текстовые сообщения ──────────────────────────────────────────
@@ -1019,6 +1271,7 @@ def build_application(token: str, proxy: str = "") -> Application:
     app.add_handler(CommandHandler("stats",   cmd_stats))
     app.add_handler(CommandHandler("scan",    cmd_scan))
     app.add_handler(CommandHandler("find",    cmd_find))
+    app.add_handler(CommandHandler("settle",  cmd_settle))
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

@@ -66,6 +66,7 @@ class Match:
     competition: str
     utc_date: Optional[datetime] = None
     external_id: Optional[str] = None
+    sport_key: str = ""           # odds-api sport key — нужен для скоринга
 
     @property
     def title(self) -> str:
@@ -256,6 +257,7 @@ async def _fetch_matches_from_odds_cache(days_ahead: int = 1) -> list[Match]:
                     competition=ev.get("sport_title") or sport,
                     utc_date=kickoff,
                     external_id=str(ev.get("id", "")),
+                    sport_key=sport,
                 ))
 
     results.sort(key=lambda m: m.utc_date or now_utc)
@@ -654,3 +656,176 @@ async def _enrich_event_odds(http: aiohttp.ClientSession, event: dict, odds: Odd
         odds.btts_no = enriched.btts_no
     if enriched.bookmaker and not odds.bookmaker:
         odds.bookmaker = enriched.bookmaker
+
+
+# ────────────────────────────────────────────────────────────────
+# Финальные счета — для settlement движка
+# ────────────────────────────────────────────────────────────────
+# Кэш скоринга: {sport_key: (timestamp, [score_event...])}
+_scores_cache: dict[str, tuple[float, list[dict]]] = {}
+_SCORES_CACHE_TTL = 1200  # 20 минут
+
+
+@dataclass
+class MatchScore:
+    home_goals: int
+    away_goals: int
+    completed: bool
+    source: str
+    last_update: Optional[datetime] = None
+
+
+async def _fetch_sport_scores(http: aiohttp.ClientSession, sport: str,
+                              days_from: int = 3) -> list[dict]:
+    """
+    GET /v4/sports/{sport}/scores/?daysFrom=N
+    Возвращает завершённые и идущие матчи за последние N дней.
+    Стоит 2 квоты за вызов на free tier — поэтому кэш на 20 мин.
+    """
+    if not config.odds_api_key:
+        return []
+    now = time.monotonic()
+    cached = _scores_cache.get(sport)
+    if cached and (now - cached[0]) < _SCORES_CACHE_TTL:
+        return cached[1]
+
+    url = f"{config.odds_base}/sports/{sport}/scores/"
+    params = {
+        "apiKey": config.odds_api_key,
+        "daysFrom": days_from,
+        "dateFormat": "iso",
+    }
+    try:
+        async with http.get(url, params=params) as r:
+            if r.status == 429:
+                log.warning("odds-api scores rate limit на %s", sport)
+                return cached[1] if cached else []
+            if r.status == 401:
+                log.error("odds-api scores: неверный ключ (401)")
+                return []
+            if r.status != 200:
+                body = await r.text()
+                log.warning("odds-api scores [%s] %s: %s", sport, r.status, body[:200])
+                return cached[1] if cached else []
+            data = await r.json()
+    except Exception as e:
+        log.warning("odds-api scores [%s] error: %s", sport, e)
+        return cached[1] if cached else []
+
+    _scores_cache[sport] = (now, data)
+    log.info("odds-api scores [%s]: %d матчей", sport, len(data))
+    return data
+
+
+def _parse_score_event(ev: dict, home_team: str, away_team: str
+                       ) -> Optional[MatchScore]:
+    """Достаём счёт из одного score-события odds-api."""
+    if not ev.get("completed"):
+        return None
+    scores_arr = ev.get("scores") or []
+    if len(scores_arr) < 2:
+        return None
+    by_team = {}
+    for s in scores_arr:
+        name = (s.get("name") or "").strip()
+        try:
+            by_team[name] = int(s.get("score") or 0)
+        except (TypeError, ValueError):
+            return None
+    # API возвращает имена ровно как home_team/away_team в том же событии,
+    # но на всякий случай fallback по позициям.
+    h = by_team.get(home_team)
+    a = by_team.get(away_team)
+    if h is None or a is None:
+        # позиционный fallback
+        h = int(scores_arr[0].get("score") or 0) if h is None else h
+        a = int(scores_arr[1].get("score") or 0) if a is None else a
+    last = None
+    if ev.get("last_update"):
+        try:
+            last = datetime.fromisoformat(ev["last_update"].replace("Z", "+00:00"))
+        except Exception:
+            last = None
+    return MatchScore(home_goals=h, away_goals=a, completed=True,
+                      source="odds-api", last_update=last)
+
+
+async def fetch_match_score(home: str, away: str,
+                            sport_key: str = "",
+                            external_id: str = "") -> Optional[MatchScore]:
+    """
+    Возвращает финальный счёт (90 минут / FT) или None.
+
+    Источники в порядке убывания приоритета:
+    1) the-odds-api scores (если знаем sport_key — один вызов; иначе — перебор)
+    2) football-data.org finished — fallback (рейтинг лимит, нет UEFA на free)
+
+    Не возвращает счёт по AET/penalties — odds-api отдаёт основное время.
+    """
+    timeout = aiohttp.ClientTimeout(total=20)
+    sports_to_try = [sport_key] if sport_key else list(config.odds_sports)
+
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        for sport in sports_to_try:
+            if not sport:
+                continue
+            events = await _fetch_sport_scores(http, sport)
+            for ev in events:
+                if external_id and str(ev.get("id", "")) == str(external_id):
+                    score = _parse_score_event(ev, ev.get("home_team", ""),
+                                               ev.get("away_team", ""))
+                    if score:
+                        return score
+                ev_home = ev.get("home_team", "")
+                ev_away = ev.get("away_team", "")
+                if (_teams_match(home, ev_home) and _teams_match(away, ev_away)):
+                    score = _parse_score_event(ev, ev_home, ev_away)
+                    if score:
+                        return score
+
+        # Fallback: football-data.org
+        if config.football_api_key:
+            headers = {"X-Auth-Token": config.football_api_key}
+            for comp in config.football_competitions:
+                matches = await _fetch_finished_matches(http, headers, comp)
+                for m in matches:
+                    fd_home = (m.get("homeTeam") or {}).get("name", "")
+                    fd_away = (m.get("awayTeam") or {}).get("name", "")
+                    if _teams_match(home, fd_home) and _teams_match(away, fd_away):
+                        ft = (m.get("score") or {}).get("fullTime") or {}
+                        h = ft.get("home")
+                        a = ft.get("away")
+                        if h is None or a is None:
+                            continue
+                        return MatchScore(
+                            home_goals=int(h), away_goals=int(a),
+                            completed=True, source="football-data",
+                        )
+    return None
+
+
+async def fetch_current_odds_decimal(home: str, away: str, market_pick: str
+                                     ) -> Optional[float]:
+    """
+    Возвращает текущий decimal-коэф для конкретной ставки (для CLV-снепшота).
+    market_pick формат: "1X2:home", "1X2:draw", "1X2:away",
+                        "TOTAL_2_5:over", "TOTAL_2_5:under",
+                        "BTTS:yes", "BTTS:no".
+    """
+    odds = await fetch_odds(home, away)
+    if not odds:
+        return None
+    market, _, side = market_pick.partition(":")
+    market = market.upper()
+    side = side.lower()
+    mapping = {
+        ("1X2", "home"): odds.home,
+        ("1X2", "draw"): odds.draw,
+        ("1X2", "away"): odds.away,
+        ("TOTAL_2_5", "over"): odds.over_2_5,
+        ("TOTAL_2_5", "under"): odds.under_2_5,
+        ("BTTS", "yes"): odds.btts_yes,
+        ("BTTS", "no"): odds.btts_no,
+    }
+    val = mapping.get((market, side))
+    return val if val and val > 1.01 else None

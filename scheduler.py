@@ -19,10 +19,13 @@ from apscheduler.triggers.interval import IntervalTrigger
 from telegram import Bot
 from telegram.constants import ParseMode
 
-from channel import format_matches_digest
+from channel import format_matches_digest, post_daily_report, reply_signal_result
 from config import config
 from db import get_bank, list_cached_matches_for_date
 from scanner import scan_and_publish, warmup_match_cache
+from settlement import (
+    settle_pending_signals, snapshot_closing_odds, void_orphan_signals,
+)
 
 
 log = logging.getLogger(__name__)
@@ -67,6 +70,52 @@ async def _midday_digest_job(bot: Bot) -> None:
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
+
+
+async def _settle_job(bot: Bot) -> None:
+    """
+    Закрываем сигналы по факту матча. Каждый settled сигнал получает reply
+    с эмодзи-результатом к исходному посту в канале.
+    """
+    try:
+        result = await settle_pending_signals()
+    except Exception as e:
+        log.exception("settle_pending_signals failed: %s", e)
+        return
+    for sig in result.get("signals", []):
+        try:
+            await reply_signal_result(bot, sig)
+        except Exception as e:
+            log.warning("reply_signal_result #%d failed: %s", sig.id, e)
+
+
+async def _clv_job() -> None:
+    """Снапшот closing odds для матчей, стартующих в ближайшие 30 минут."""
+    try:
+        n = await snapshot_closing_odds()
+        if n:
+            log.info("CLV snapshot: записано closing_odds для %d сигналов", n)
+    except Exception as e:
+        log.warning("clv snapshot failed: %s", e)
+
+
+async def _daily_report_job(bot: Bot) -> None:
+    """Утренний отчёт за вчера в канал. Перед публикацией — финальный settle."""
+    try:
+        await settle_pending_signals()
+    except Exception as e:
+        log.warning("pre-report settle failed: %s", e)
+    try:
+        await post_daily_report(bot)
+    except Exception as e:
+        log.exception("post_daily_report failed: %s", e)
+
+
+async def _orphan_void_job() -> None:
+    try:
+        await void_orphan_signals(stale_days=7)
+    except Exception as e:
+        log.warning("orphan void failed: %s", e)
 
 
 async def _keepalive_job() -> None:
@@ -118,6 +167,40 @@ def start_scheduler(bot: Bot) -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    # Settlement: каждый час расчёт закрытых матчей (минимум +2ч после старта)
+    scheduler.add_job(
+        _settle_job,
+        trigger=IntervalTrigger(hours=1),
+        args=[bot],
+        id="settle_signals",
+        replace_existing=True,
+    )
+
+    # CLV snapshot: каждые 5 минут — снимаем closing odds для стартующих матчей
+    scheduler.add_job(
+        _clv_job,
+        trigger=IntervalTrigger(minutes=5),
+        id="clv_snapshot",
+        replace_existing=True,
+    )
+
+    # Утренний отчёт за вчера: 10:00 МСК = 07:00 UTC
+    scheduler.add_job(
+        _daily_report_job,
+        trigger=CronTrigger(hour=7, minute=0),
+        args=[bot],
+        id="daily_report",
+        replace_existing=True,
+    )
+
+    # Сигналы старше 7 дней без счёта → void (раз в сутки в 03:00 UTC)
+    scheduler.add_job(
+        _orphan_void_job,
+        trigger=CronTrigger(hour=3, minute=0),
+        id="orphan_void",
+        replace_existing=True,
+    )
+
     # Keep-alive каждые 10 минут (Render засыпает через 15)
     scheduler.add_job(
         _keepalive_job,
@@ -128,7 +211,9 @@ def start_scheduler(bot: Bot) -> AsyncIOScheduler:
 
     scheduler.start()
     log.info(
-        "Scheduler started: daily scan @ %02d:00 UTC | digest @ %02d:00 UTC | keep-alive every 10 min",
+        "Scheduler started: daily scan @ %02d:00 UTC | digest @ %02d:00 UTC | "
+        "settle every 1h | CLV every 5m | report @ 07:00 UTC | "
+        "orphan-void @ 03:00 UTC | keep-alive every 10 min",
         config.daily_scan_hour,
         config.daily_digest_hour,
     )

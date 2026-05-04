@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, Float, Integer, String, Text,
-    func, select, update,
+    func, inspect, select, update,
 )
 from sqlalchemy.ext.asyncio import (
     AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine,
@@ -70,8 +70,18 @@ class Signal(Base):
     away_form = Column(String(32))
     recommended_stake = Column(Float, default=0.0)
     channel_message_id = Column(BigInteger)
-    status = Column(String(16), default="pending")      # pending/win/loss/void
+    status = Column(String(16), default="pending")      # pending/win/loss/void/needs_review
     created_at = Column(DateTime, default=utcnow)
+
+    # Settlement (Фаза 1: bet results reporting)
+    sport_key = Column(String(64))                      # odds-api sport key для скоринга
+    result_score = Column(String(16))                   # "2:1" — для UI
+    home_goals = Column(Integer)
+    away_goals = Column(Integer)
+    settled_at = Column(DateTime)
+    settle_source = Column(String(32))                  # "odds-api" / "football-data" / "manual"
+    pnl_units = Column(Float, default=0.0)              # P&L в долях ставки (1u = размер ставки)
+    closing_odds = Column(Float)                        # коэф на старте — для CLV
 
 
 class Bet(Base):
@@ -146,6 +156,43 @@ _engine: Optional[AsyncEngine] = None
 _SessionMaker: Optional[async_sessionmaker[AsyncSession]] = None
 
 
+# Колонки, которые могли отсутствовать в существующей БД (новые фичи).
+# create_all только создаёт таблицы, не апдейтит существующие — поэтому
+# для добавленных колонок делаем idempotent ALTER TABLE.
+_SIGNAL_NEW_COLUMNS: dict[str, str] = {
+    "sport_key": "VARCHAR(64)",
+    "result_score": "VARCHAR(16)",
+    "home_goals": "INTEGER",
+    "away_goals": "INTEGER",
+    "settled_at": "TIMESTAMP",
+    "settle_source": "VARCHAR(32)",
+    "pnl_units": "FLOAT DEFAULT 0",
+    "closing_odds": "FLOAT",
+}
+
+
+async def _migrate_signal_schema() -> None:
+    """Добавляем недостающие колонки в signals для существующих БД."""
+    if _engine is None:
+        return
+    async with _engine.begin() as conn:
+        def _existing_columns(sync_conn):
+            insp = inspect(sync_conn)
+            try:
+                return {col["name"] for col in insp.get_columns("signals")}
+            except Exception:
+                return set()
+        existing = await conn.run_sync(_existing_columns)
+        for name, ddl in _SIGNAL_NEW_COLUMNS.items():
+            if name in existing:
+                continue
+            try:
+                await conn.exec_driver_sql(f"ALTER TABLE signals ADD COLUMN {name} {ddl}")
+                log.info("Migration: signals.%s added", name)
+            except Exception as e:
+                log.warning("Migration: skip signals.%s: %s", name, e)
+
+
 async def init_db() -> None:
     global _engine, _SessionMaker
     url = config.database_url
@@ -157,6 +204,7 @@ async def init_db() -> None:
 
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await _migrate_signal_schema()
     log.info("DB schema ready")
 
 
@@ -562,3 +610,210 @@ async def retro_report(user_id: int, limit: int = 20) -> list[Bet]:
             .order_by(Bet.closed_at.desc().nullslast()).limit(limit)
         )
         return list(res.scalars().all())
+
+
+# ────────────────────────────────────────────────────────────────
+# CRUD: settlement & reporting
+# ────────────────────────────────────────────────────────────────
+async def list_signals_to_settle(grace_hours: int = 2,
+                                  max_age_days: int = 14) -> list[Signal]:
+    """
+    Pending-сигналы готовы к settle когда:
+      - kickoff < now - grace_hours (минимум 2ч после старта = матч закончился)
+      - kickoff > now - max_age_days (отсекаем legacy без kickoff)
+    """
+    now = utcnow()
+    earliest = now - timedelta(days=max_age_days)
+    latest = now - timedelta(hours=grace_hours)
+    async with session() as s:
+        res = await s.execute(
+            select(Signal)
+            .where(
+                Signal.status == "pending",
+                Signal.kickoff.isnot(None),
+                Signal.kickoff >= earliest,
+                Signal.kickoff <= latest,
+            )
+            .order_by(Signal.kickoff.asc())
+        )
+        return list(res.scalars().all())
+
+
+async def list_signals_kicking_soon(window_min: int = 30) -> list[Signal]:
+    """Сигналы чей старт через ≤window_min минут — для CLV-снапшотов."""
+    now = utcnow()
+    horizon = now + timedelta(minutes=window_min)
+    async with session() as s:
+        res = await s.execute(
+            select(Signal)
+            .where(
+                Signal.status == "pending",
+                Signal.closing_odds.is_(None),
+                Signal.kickoff.isnot(None),
+                Signal.kickoff > now,
+                Signal.kickoff <= horizon,
+            )
+        )
+        return list(res.scalars().all())
+
+
+async def list_orphan_pending_signals(stale_days: int = 7) -> list[Signal]:
+    """Pending старше N дней без счёта — кандидаты на void."""
+    cutoff = utcnow() - timedelta(days=stale_days)
+    async with session() as s:
+        res = await s.execute(
+            select(Signal).where(
+                Signal.status == "pending",
+                Signal.kickoff.isnot(None),
+                Signal.kickoff <= cutoff,
+            )
+        )
+        return list(res.scalars().all())
+
+
+async def update_signal_settlement(
+    signal_id: int,
+    *,
+    status: str,
+    home_goals: Optional[int],
+    away_goals: Optional[int],
+    pnl_units: float,
+    settle_source: str,
+) -> None:
+    score = (
+        f"{home_goals}:{away_goals}"
+        if home_goals is not None and away_goals is not None else None
+    )
+    async with session() as s:
+        await s.execute(
+            update(Signal)
+            .where(Signal.id == signal_id)
+            .values(
+                status=status,
+                home_goals=home_goals,
+                away_goals=away_goals,
+                result_score=score,
+                pnl_units=round(pnl_units, 4),
+                settle_source=settle_source,
+                settled_at=utcnow(),
+            )
+        )
+        await s.commit()
+
+
+async def set_signal_closing_odds(signal_id: int, closing_odds: float) -> None:
+    async with session() as s:
+        await s.execute(
+            update(Signal)
+            .where(Signal.id == signal_id, Signal.closing_odds.is_(None))
+            .values(closing_odds=round(closing_odds, 3))
+        )
+        await s.commit()
+
+
+def _msk_day_bounds(day: date) -> tuple[datetime, datetime]:
+    """Границы суток МСК в naive UTC (для SQL-сравнения с Signal.kickoff)."""
+    msk = timezone(timedelta(hours=3))
+    start_msk = datetime.combine(day, datetime.min.time(), tzinfo=msk)
+    end_msk = start_msk + timedelta(days=1)
+    return (
+        start_msk.astimezone(timezone.utc).replace(tzinfo=None),
+        end_msk.astimezone(timezone.utc).replace(tzinfo=None),
+    )
+
+
+async def settled_signals_for_msk_date(day: date) -> list[Signal]:
+    start, end = _msk_day_bounds(day)
+    async with session() as s:
+        res = await s.execute(
+            select(Signal)
+            .where(
+                Signal.kickoff >= start,
+                Signal.kickoff < end,
+                Signal.status.in_(["win", "loss", "void"]),
+            )
+            .order_by(Signal.kickoff.asc())
+        )
+        return list(res.scalars().all())
+
+
+async def settled_signals_in_range(days: int) -> list[Signal]:
+    """Settled signals за последние N дней по МСК (include today's settled)."""
+    msk = timezone(timedelta(hours=3))
+    today_msk = datetime.now(msk).date()
+    start_day = today_msk - timedelta(days=days - 1)
+    start, _ = _msk_day_bounds(start_day)
+    async with session() as s:
+        res = await s.execute(
+            select(Signal)
+            .where(
+                Signal.kickoff >= start,
+                Signal.status.in_(["win", "loss", "void"]),
+            )
+            .order_by(Signal.kickoff.asc())
+        )
+        return list(res.scalars().all())
+
+
+def aggregate_signal_stats(signals: list["Signal"]) -> dict:
+    """Метрики по списку settled сигналов."""
+    total = len(signals)
+    wins = sum(1 for s in signals if s.status == "win")
+    losses = sum(1 for s in signals if s.status == "loss")
+    voids = sum(1 for s in signals if s.status == "void")
+    decided = wins + losses
+    pnl = sum(float(s.pnl_units or 0) for s in signals)
+    staked_units = decided  # каждая ставка = 1u номинала, void не считаем
+    roi = (pnl / staked_units * 100) if staked_units else 0.0
+    win_rate = (wins / decided * 100) if decided else 0.0
+    avg_odds = (
+        sum(float(s.book_odds or 0) for s in signals if s.status in ("win", "loss"))
+        / decided
+    ) if decided else 0.0
+
+    # CLV: среднее (book_odds / closing_odds - 1) * 100% по сигналам с closing_odds
+    clv_pairs = [
+        (float(s.book_odds), float(s.closing_odds))
+        for s in signals
+        if s.book_odds and s.closing_odds and s.closing_odds > 1.01
+    ]
+    if clv_pairs:
+        clv_pct = sum((b / c - 1) * 100 for b, c in clv_pairs) / len(clv_pairs)
+    else:
+        clv_pct = 0.0
+
+    return {
+        "total": total,
+        "wins": wins,
+        "losses": losses,
+        "voids": voids,
+        "decided": decided,
+        "pnl_units": round(pnl, 3),
+        "roi_pct": round(roi, 2),
+        "win_rate_pct": round(win_rate, 1),
+        "avg_odds": round(avg_odds, 2),
+        "clv_pct": round(clv_pct, 2),
+        "clv_sample": len(clv_pairs),
+    }
+
+
+async def aggregate_signal_breakdown(days: int, group_by: str) -> list[dict]:
+    """
+    group_by ∈ {"market","league"}: возвращает список словарей с метриками.
+    Используется для разделов «По рынкам» / «По лигам» в ретро-отчёте.
+    """
+    sigs = await settled_signals_in_range(days)
+    if group_by not in ("market", "league"):
+        raise ValueError(f"unknown group_by: {group_by}")
+
+    buckets: dict[str, list[Signal]] = {}
+    for s in sigs:
+        key = (s.market if group_by == "market" else (s.league or "—")) or "—"
+        buckets.setdefault(key, []).append(s)
+
+    rows = []
+    for key, items in buckets.items():
+        agg = aggregate_signal_stats(items)
+        rows.append({"key": key, **agg})
+    rows.sort(key=lambda r: (r["pnl_units"], r["total"]), reverse=True)
+    return rows

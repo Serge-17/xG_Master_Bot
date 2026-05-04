@@ -22,7 +22,10 @@ from telegram.constants import ParseMode
 from analysis import Pick
 from config import config
 from data_sources import Match, Odds
-from db import Signal, set_signal_message_id
+from db import (
+    Signal, aggregate_signal_stats, set_signal_message_id,
+    settled_signals_for_msk_date, settled_signals_in_range,
+)
 
 
 log = logging.getLogger(__name__)
@@ -279,4 +282,152 @@ async def publish_signal(bot: Bot, signal: Signal, match: Match,
         return True
     except Exception as e:
         log.error("Не удалось опубликовать в %s: %s", config.channel_id, e)
+        return False
+
+
+# ────────────────────────────────────────────────────────────────
+# Reporting: per-signal reply + daily channel report
+# ────────────────────────────────────────────────────────────────
+_VERDICT_ICON = {"win": "✅", "loss": "❌", "void": "➖"}
+
+
+def _format_signal_result_line(s: Signal) -> str:
+    icon = _VERDICT_ICON.get(s.status, "•")
+    score = s.result_score or "—:—"
+    pnl = float(s.pnl_units or 0)
+    pnl_txt = f"{pnl:+.2f}u" if s.status != "void" else "возврат"
+    return (
+        f"{icon} <b>{s.match}</b> · {s.pick} @{s.book_odds:.2f} · "
+        f"{score} · {pnl_txt}"
+    )
+
+
+def format_daily_report(report_date_msk, signals: list[Signal],
+                        rolling_30d: Optional[list[Signal]] = None) -> str:
+    """Текст автоморнинг-отчёта в канал."""
+    date_str = report_date_msk.strftime("%d.%m.%Y")
+    if not signals:
+        body = [
+            f"📊 <b>Отчёт за {date_str}</b>",
+            "",
+            "<i>Вчера сигналов в канал не выкатывал — линия не давала value, "
+            "лучше пропустить день, чем форсить.</i>",
+        ]
+        if rolling_30d:
+            agg30 = aggregate_signal_stats(rolling_30d)
+            voids_chunk = f"-{agg30['voids']}в" if agg30['voids'] else ""
+            body += [
+                "",
+                f"📈 <b>Месяц:</b> {agg30['wins']}-{agg30['losses']}{voids_chunk} · "
+                f"ROI {agg30['roi_pct']:+.1f}% · "
+                f"банк {agg30['pnl_units']:+.2f}u",
+            ]
+        return "\n".join(body)
+
+    agg = aggregate_signal_stats(signals)
+    lines = [f"📊 <b>Отчёт за {date_str}</b>", ""]
+    for s in signals:
+        lines.append(_format_signal_result_line(s))
+
+    decided = agg["decided"]
+    score_line = f"{agg['wins']}/{decided}" if decided else "—"
+    void_chunk = f" · ➖{agg['voids']} возврат" if agg["voids"] else ""
+    lines += [
+        "",
+        f"<b>Итог:</b> {score_line}{void_chunk} · "
+        f"ROI {agg['roi_pct']:+.1f}% · "
+        f"банк {agg['pnl_units']:+.2f}u",
+    ]
+    if agg.get("clv_sample"):
+        lines.append(f"📐 CLV {agg['clv_pct']:+.2f}% (n={agg['clv_sample']})")
+
+    if rolling_30d:
+        agg30 = aggregate_signal_stats(rolling_30d)
+        lines += [
+            "",
+            f"📈 <b>Месяц:</b> {agg30['wins']}-{agg30['losses']}"
+            f" · ROI {agg30['roi_pct']:+.1f}% · "
+            f"банк {agg30['pnl_units']:+.2f}u",
+        ]
+        if agg30.get("clv_sample"):
+            lines.append(f"📐 CLV месяца: {agg30['clv_pct']:+.2f}% "
+                         f"(n={agg30['clv_sample']})")
+
+    lines += [
+        "",
+        DISCLAIMER,
+    ]
+    return "\n".join(lines)
+
+
+async def post_daily_report(bot: Bot,
+                            report_date_msk=None) -> bool:
+    """
+    Постит отчёт за вчерашний день по МСК. Возвращает True если опубликовано.
+    """
+    if not config.channel_id:
+        log.info("CHANNEL_ID не задан — daily report пропущен")
+        return False
+
+    msk = timezone(timedelta(hours=3))
+    if report_date_msk is None:
+        report_date_msk = (datetime.now(msk) - timedelta(days=1)).date()
+
+    sigs = await settled_signals_for_msk_date(report_date_msk)
+    rolling = await settled_signals_in_range(days=30)
+
+    text = format_daily_report(report_date_msk, sigs, rolling)
+    try:
+        await bot.send_message(
+            chat_id=config.channel_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        log.info("daily report опубликован за %s (n=%d)", report_date_msk, len(sigs))
+        return True
+    except Exception as e:
+        log.error("daily report не опубликован: %s", e)
+        return False
+
+
+async def reply_signal_result(bot: Bot, signal: Signal) -> bool:
+    """
+    Отвечаем эмодзи-результатом к исходному посту в канале.
+    Это соцдоказательство: канал не удаляет проигрышные сигналы.
+    """
+    if not config.channel_id or not signal.channel_message_id:
+        return False
+    if signal.status not in ("win", "loss", "void"):
+        return False
+
+    icon = _VERDICT_ICON.get(signal.status, "•")
+    score = signal.result_score or "—:—"
+    pnl = float(signal.pnl_units or 0)
+    pnl_txt = f"{pnl:+.2f}u" if signal.status != "void" else "возврат"
+
+    if signal.status == "win":
+        head = "Зашло"
+    elif signal.status == "loss":
+        head = "Не зашло"
+    else:
+        head = "Возврат"
+
+    text = (
+        f"{icon} <b>{head}</b> · {signal.pick} @{signal.book_odds:.2f}\n"
+        f"Финал: <b>{score}</b> · {pnl_txt}"
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=config.channel_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=signal.channel_message_id,
+            disable_web_page_preview=True,
+            allow_sending_without_reply=True,
+        )
+        return True
+    except Exception as e:
+        log.warning("reply_signal_result #%d failed: %s", signal.id, e)
         return False

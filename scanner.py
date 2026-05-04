@@ -289,6 +289,7 @@ async def scan_and_build_signals(bank: float, limit: int = 25
             home_form=getattr(cached, "home_form", meta["home_form"]) or meta["home_form"],
             away_form=getattr(cached, "away_form", meta["away_form"]) or meta["away_form"],
             recommended_stake=pick.recommended_stake,
+            sport_key=match.sport_key or "",
         )
         results.append((signal_id, match, model, cached))
         await asyncio.sleep(2)
