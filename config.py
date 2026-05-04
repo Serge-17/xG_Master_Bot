@@ -47,6 +47,11 @@ def _normalize_db_url(url: str) -> str:
     return url
 
 
+def _csv_tuple(value: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    items = tuple(x.strip().upper() for x in (value or "").split(",") if x.strip())
+    return items or default
+
+
 @dataclass
 class Config:
     # Telegram
@@ -112,6 +117,18 @@ class Config:
     # min_edge поднят с 1.5% до 3%: при средней EU-маржe 6-8% значения
     # ниже этого порога — шум модели, не реальный edge.
     min_edge: float = 0.03
+
+    # Quality gate публичных сигналов.
+    # Аудит 27.04-03.05: 1X2 дал +39.7% ROI, totals/BTTS дали -72.5%/-100%.
+    # До отдельной калибровки тоталов и BTTS канал публикует только 1X2.
+    allowed_signal_markets: tuple[str, ...] = field(default_factory=lambda: _csv_tuple(
+        os.getenv("ALLOWED_SIGNAL_MARKETS", "1X2"),
+        ("1X2",),
+    ))
+    min_signal_odds: float = field(default_factory=lambda: float(os.getenv("MIN_SIGNAL_ODDS", "1.70")))
+    max_signal_odds: float = field(default_factory=lambda: float(os.getenv("MAX_SIGNAL_ODDS", "3.30")))
+    min_form_games_for_signal: int = field(default_factory=lambda: int(os.getenv("MIN_FORM_GAMES_FOR_SIGNAL", "4")))
+    min_minutes_before_kickoff: int = field(default_factory=lambda: int(os.getenv("MIN_MINUTES_BEFORE_KICKOFF", "30")))
 
     # Расписание (UTC)
     daily_scan_hour: int = 9

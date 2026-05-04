@@ -299,6 +299,29 @@ async def find_signal_by_match(query: str, limit: int = 10) -> list[Signal]:
         return list(res.scalars().all())
 
 
+async def find_recent_signal(
+    match: str,
+    market: str,
+    pick: str,
+    max_age_hours: int = 96,
+) -> Optional[Signal]:
+    """Ищем свежий дубликат сигнала, чтобы канал не усиливал одну экспозицию."""
+    cutoff_dt = datetime.fromtimestamp(utcnow().timestamp() - max_age_hours * 3600)
+    async with session() as s:
+        res = await s.execute(
+            select(Signal)
+            .where(
+                func.lower(Signal.match) == match.lower(),
+                func.lower(Signal.market) == market.lower(),
+                func.lower(Signal.pick) == pick.lower(),
+                Signal.created_at >= cutoff_dt,
+            )
+            .order_by(Signal.created_at.desc())
+            .limit(1)
+        )
+        return res.scalar_one_or_none()
+
+
 async def upsert_cached_match(
     *,
     match_key: str,

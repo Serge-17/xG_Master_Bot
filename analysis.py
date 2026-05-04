@@ -230,8 +230,14 @@ class Pick:
 
 def _pack(market: str, label: str, prob: float, book: float, market_prob: float,
           bank: float, min_edge: float,
-          min_conf: float) -> Optional[Pick]:
+          min_conf: float,
+          min_odds: float = 0.0,
+          max_odds: float = 0.0) -> Optional[Pick]:
     if book <= 1 or prob <= 0:
+        return None
+    if min_odds and book < min_odds:
+        return None
+    if max_odds and book > max_odds:
         return None
     if prob < min_conf:
         return None
@@ -253,7 +259,10 @@ def _pack(market: str, label: str, prob: float, book: float, market_prob: float,
 def build_value_picks(home: str, away: str, odds: Odds,
                       model: dict, bank: float,
                       min_edge: Optional[float] = None,
-                      min_conf: float = 0.40) -> list[Pick]:
+                      min_conf: float = 0.40,
+                      allowed_markets: Optional[tuple[str, ...]] = None,
+                      min_odds: float = 0.0,
+                      max_odds: float = 0.0) -> list[Pick]:
     """
     Строим cross-market value-сигналы:
     - 1X2: только если модель и рынок расходятся ≥ 4% (cross-market check).
@@ -261,40 +270,50 @@ def build_value_picks(home: str, away: str, odds: Odds,
     """
     if min_edge is None:
         min_edge = config.min_edge
+    allowed = {m.upper() for m in allowed_markets} if allowed_markets else None
+
+    def market_enabled(name: str) -> bool:
+        return allowed is None or name.upper() in allowed
 
     candidates: list[Optional[Pick]] = []
     fair_1x2 = implied_probs_fair([odds.home, odds.draw, odds.away]) \
         if odds.has_1x2() else [0.0, 0.0, 0.0]
 
-    # 1X2: cross-market gate ≥ 4%
-    for label, m_prob, f_prob, book in [
-        (f"Победа {home}", model["home"], fair_1x2[0], odds.home),
-        (f"Победа {away}", model["away"], fair_1x2[2], odds.away),
-    ]:
-        if abs(m_prob - f_prob) >= 0.04:
-            p = _pack("1X2", label, m_prob, book, f_prob, bank, min_edge, min_conf)
-            if p:
-                candidates.append(p)
+    if market_enabled("1X2"):
+        # 1X2: cross-market gate ≥ 4%
+        for label, m_prob, f_prob, book in [
+            (f"Победа {home}", model["home"], fair_1x2[0], odds.home),
+            (f"Победа {away}", model["away"], fair_1x2[2], odds.away),
+        ]:
+            if abs(m_prob - f_prob) >= 0.04:
+                p = _pack("1X2", label, m_prob, book, f_prob, bank, min_edge, min_conf,
+                          min_odds=min_odds, max_odds=max_odds)
+                if p:
+                    candidates.append(p)
 
     # Тоталы 2.5
-    if odds.over_2_5 > 1 and odds.under_2_5 > 1:
+    if market_enabled("TOTAL_2_5") and odds.over_2_5 > 1 and odds.under_2_5 > 1:
         fair_tot = implied_probs_fair([odds.over_2_5, odds.under_2_5])
         candidates.append(_pack("TOTAL_2_5", "Тотал больше 2.5",
                                 model["over_2_5"], odds.over_2_5, fair_tot[0],
-                                bank, min_edge, min_conf))
+                                bank, min_edge, min_conf,
+                                min_odds=min_odds, max_odds=max_odds))
         candidates.append(_pack("TOTAL_2_5", "Тотал меньше 2.5",
                                 model["under_2_5"], odds.under_2_5, fair_tot[1],
-                                bank, min_edge, min_conf))
+                                bank, min_edge, min_conf,
+                                min_odds=min_odds, max_odds=max_odds))
 
     # BTTS
-    if odds.btts_yes > 1 and odds.btts_no > 1:
+    if market_enabled("BTTS") and odds.btts_yes > 1 and odds.btts_no > 1:
         fair_btts = implied_probs_fair([odds.btts_yes, odds.btts_no])
         candidates.append(_pack("BTTS", "Обе забьют — Да",
                                 model["btts_yes"], odds.btts_yes, fair_btts[0],
-                                bank, min_edge, min_conf))
+                                bank, min_edge, min_conf,
+                                min_odds=min_odds, max_odds=max_odds))
         candidates.append(_pack("BTTS", "Обе забьют — Нет",
                                 model["btts_no"], odds.btts_no, fair_btts[1],
-                                bank, min_edge, min_conf))
+                                bank, min_edge, min_conf,
+                                min_odds=min_odds, max_odds=max_odds))
 
     picks = [p for p in candidates if p is not None]
     picks.sort(key=lambda p: p.edge, reverse=True)
@@ -303,7 +322,12 @@ def build_value_picks(home: str, away: str, odds: Odds,
 
 def best_value_pick(home: str, away: str, odds: Odds,
                     model: dict, bank: float) -> Optional[Pick]:
-    return next(iter(build_value_picks(home, away, odds, model, bank)), None)
+    return next(iter(build_value_picks(
+        home, away, odds, model, bank,
+        allowed_markets=config.allowed_signal_markets,
+        min_odds=config.min_signal_odds,
+        max_odds=config.max_signal_odds,
+    )), None)
 
 
 def best_guess_pick(home: str, away: str, odds: Odds,

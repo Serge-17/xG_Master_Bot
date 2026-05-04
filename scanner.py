@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
+from typing import Optional
 
 from telegram import Bot
 
@@ -14,8 +16,9 @@ from ai import explain_pick
 from analysis import best_guess_pick, best_value_pick, poisson_probs, xg_from_odds
 from channel import publish_signal
 from config import config
-from data_sources import Match, Odds, fetch_matches, fetch_odds, fetch_team_form
+from data_sources import Match, Odds, TeamForm, fetch_matches, fetch_odds, fetch_team_form
 from db import (
+    find_recent_signal,
     get_cached_match,
     get_latest_odds_snapshot,
     get_signal,
@@ -58,6 +61,49 @@ def _context_to_text(cached) -> str:
     if cached.away_summary:
         parts.append(f"{cached.away}: {cached.away_summary}")
     return "\n".join(parts)
+
+
+def _form_games(form: Optional[TeamForm]) -> int:
+    if not form:
+        return 0
+    return int(form.wins + form.draws + form.losses)
+
+
+def _minutes_to_kickoff(match: Match) -> Optional[float]:
+    if match.utc_date is None:
+        return None
+    dt = match.utc_date
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (dt - datetime.now(timezone.utc)).total_seconds() / 60
+
+
+def _public_signal_reject_reason(
+    match: Match,
+    pick,
+    home_form: Optional[TeamForm],
+    away_form: Optional[TeamForm],
+) -> str:
+    minutes = _minutes_to_kickoff(match)
+    if minutes is not None and minutes < config.min_minutes_before_kickoff:
+        return f"до старта {minutes:.0f} мин < {config.min_minutes_before_kickoff}"
+
+    if pick.market.upper() not in {m.upper() for m in config.allowed_signal_markets}:
+        return f"рынок {pick.market} отключён quality gate"
+
+    if pick.book_odds < config.min_signal_odds or pick.book_odds > config.max_signal_odds:
+        return (
+            f"коэффициент {pick.book_odds:.2f} вне диапазона "
+            f"{config.min_signal_odds:.2f}-{config.max_signal_odds:.2f}"
+        )
+
+    min_games = config.min_form_games_for_signal
+    home_games = _form_games(home_form)
+    away_games = _form_games(away_form)
+    if min_games and (home_games < min_games or away_games < min_games):
+        return f"недостаточно формы: {home_games}/{away_games} игр < {min_games}"
+
+    return ""
 
 
 async def _prepare_match_cache(match: Match, include_forms: bool = True) -> tuple[Optional[Odds], object]:
@@ -186,7 +232,7 @@ async def _process_match(match: Match, bank: float, strict: bool = True):
     pick = best_value_pick(match.home, match.away, odds, model, bank) if strict \
         else best_guess_pick(match.home, match.away, odds, model, bank)
 
-    return (pick, odds, model, cached) if pick else None
+    return (pick, odds, model, cached, home_form, away_form) if pick else None
 
 
 async def scan_and_build_signals(bank: float, limit: int = 25
@@ -204,7 +250,22 @@ async def scan_and_build_signals(bank: float, limit: int = 25
         res = await _process_match(match, bank, strict=True)
         if res is None:
             continue
-        pick, odds, model, cached = res
+        pick, odds, model, cached, home_form, away_form = res
+
+        reject_reason = _public_signal_reject_reason(match, pick, home_form, away_form)
+        if reject_reason:
+            log.info("[quality-skip] %s / %s: %s", match.title, pick.pick, reject_reason)
+            continue
+
+        duplicate = await find_recent_signal(match.title, pick.market, pick.pick)
+        if duplicate:
+            log.info(
+                "[duplicate-skip] %s / %s already signal #%d",
+                match.title,
+                pick.pick,
+                duplicate.id,
+            )
+            continue
 
         meta = await explain_pick(
             match.home, match.away, match.competition,
@@ -247,7 +308,7 @@ async def scan_best_guesses(bank: float, limit: int = 20) -> list[dict]:
         res = await _process_match(match, bank, strict=False)
         if res is None:
             continue
-        pick, odds, model, cached = res
+        pick, odds, model, cached, _, _ = res
         results.append({
             "match": match,
             "pick": pick,
