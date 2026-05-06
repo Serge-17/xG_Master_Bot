@@ -1,6 +1,7 @@
 # ⚽ xG Master Bot
 
 > Telegram-бот для анализа футбольной статистики xG, поиска value-ставок и ведения банкролла.
+> @xG_Master_Bot_bot
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
 ![python-telegram-bot](https://img.shields.io/badge/python--telegram--bot-20.x-2CA5E0?logo=telegram)
