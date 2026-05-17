@@ -252,6 +252,7 @@ async def publish_signal(bot: Bot, signal: Signal, match: Match,
         probability=signal.probability, book_odds=signal.book_odds,
         fair_odds=signal.fair_odds, edge=signal.edge,
         recommended_stake=signal.recommended_stake,
+        market_probability=float(signal.market_probability or 0.0),
     )
     injuries = _list_from_cached_field(getattr(cached, "injuries", None))
     facts = _list_from_cached_field(getattr(cached, "facts", None))

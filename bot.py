@@ -393,7 +393,11 @@ async def callback_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not sig:
             await q.message.reply_text("Этого сигнала уже нет в базе."); return
         if data.startswith("sig_odds_"):
-            market_prob = 1 / sig.book_odds if sig.book_odds > 1 else 0.0
+            market_prob = (
+                float(sig.market_probability or 0.0)
+                if getattr(sig, "market_probability", 0.0)
+                else (1 / sig.book_odds if sig.book_odds > 1 else 0.0)
+            )
             gap = (sig.probability - market_prob) * 100
             body = (
                 f"📊 <b>Коэффициенты — {sig.match}</b>\n\n"

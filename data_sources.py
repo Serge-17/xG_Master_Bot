@@ -148,7 +148,13 @@ async def fetch_matches(days_ahead: int = 1) -> list[Match]:
         log.warning("sports.ru matches fallback failed: %s", e)
 
     if not config.football_api_key:
-        log.warning("FOOTBALL_API_KEY не задан и sports.ru не отдал матчи — демо-матчи")
+        if not config.allow_demo_data:
+            log.warning(
+                "FOOTBALL_API_KEY не задан и sports.ru не отдал матчи — "
+                "demo-матчи отключены"
+            )
+            return []
+        log.warning("FOOTBALL_API_KEY не задан и sports.ru не отдал матчи — demo-матчи")
         return [
             Match("Real Madrid", "Barcelona", "La Liga",
                   utc_date=datetime.now(timezone.utc) + timedelta(hours=3)),
@@ -536,6 +542,9 @@ async def _fetch_sport_odds(http: aiohttp.ClientSession, sport: str) -> list:
 
 async def fetch_odds(home: str, away: str) -> Optional[Odds]:
     if not config.odds_api_key:
+        if not config.allow_demo_data:
+            log.warning("ODDS_API_KEY не задан — коэффициенты для %s vs %s недоступны", home, away)
+            return None
         return Odds(home=2.10, draw=3.30, away=3.50,
                     over_2_5=1.85, under_2_5=1.95,
                     btts_yes=1.80, btts_no=1.95, bookmaker="demo")

@@ -47,6 +47,7 @@ WEBHOOK_PATH = f"/webhook/{_BOT_ID}"
 _tg_app = None
 _scheduler = None
 _ready = False   # True когда бот полностью инициализирован
+_init_errors: list[str] = []
 
 
 async def _init_bot():
@@ -54,6 +55,7 @@ async def _init_bot():
     global _tg_app, _scheduler, _ready
 
     log.info("Фоновая инициализация бота...")
+    _init_errors.clear()
 
     # Маленькая пауза чтобы uvicorn успел поднять сервер
     await asyncio.sleep(2)
@@ -69,6 +71,8 @@ async def _init_bot():
         log.info("DB готова")
     except Exception as e:
         log.error("init_db: %s", e)
+        _init_errors.append(f"db: {e}")
+        return
 
     # Прогрев кэша коэффициентов
     try:
@@ -81,6 +85,7 @@ async def _init_bot():
 
     if not config.telegram_token:
         log.error("TELEGRAM_BOT_TOKEN не задан")
+        _init_errors.append("telegram token missing")
         return
 
     # Telegram
@@ -97,10 +102,12 @@ async def _init_bot():
             await asyncio.sleep(min(5 * attempt, 20))
     else:
         log.error("Telegram init не удался")
+        _init_errors.append("telegram initialize failed")
         return
 
     await tg_app.start()
 
+    telegram_ready = False
     if USE_WEBHOOK:
         full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
         try:
@@ -110,8 +117,10 @@ async def _init_bot():
                 allowed_updates=Update.ALL_TYPES,
             )
             log.info("✅ Webhook: %s", full_url)
+            telegram_ready = True
         except Exception as e:
             log.error("set_webhook: %s", e)
+            _init_errors.append(f"set_webhook: {e}")
     else:
         try:
             await tg_app.bot.delete_webhook(drop_pending_updates=True)
@@ -125,10 +134,21 @@ async def _init_bot():
                     bootstrap_retries=3,
                 )
                 log.info("✅ Polling запущен")
+                telegram_ready = True
                 break
             except Exception as e:
                 log.warning("polling attempt %d: %s", attempt, e)
                 await asyncio.sleep(5)
+        if not telegram_ready:
+            _init_errors.append("polling failed")
+
+    if not telegram_ready:
+        try:
+            await tg_app.stop()
+            await tg_app.shutdown()
+        except Exception:
+            pass
+        return
 
     from scheduler import start_scheduler
     scheduler = start_scheduler(tg_app.bot)
@@ -194,10 +214,11 @@ async def root():
         "status": "ok",
         "bot_ready": _ready,
         "mode": "webhook" if USE_WEBHOOK else "polling",
+        "init_errors": _init_errors[-5:],
     }
 
 
 @app.get("/health")
 async def health():
     # Всегда 200 — Railway Healthcheck проходит сразу
-    return {"status": "healthy", "bot_ready": _ready}
+    return {"status": "healthy", "bot_ready": _ready, "init_errors": _init_errors[-5:]}

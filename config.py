@@ -52,6 +52,13 @@ def _csv_tuple(value: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return items or default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 @dataclass
 class Config:
     # Telegram
@@ -142,6 +149,8 @@ class Config:
     # FIX: TTL кэша матчей в секундах (60 мин). Предотвращает повторные
     # запросы к API при нескольких /scan подряд.
     matches_cache_ttl: int = 3600
+    allow_demo_data: bool = field(default_factory=lambda: _env_bool("ALLOW_DEMO_DATA", False))
+    allow_web_odds_fallback: bool = field(default_factory=lambda: _env_bool("ALLOW_WEB_ODDS_FALLBACK", False))
 
     def validate(self) -> list[str]:
         problems: list[str] = []
@@ -150,9 +159,15 @@ class Config:
         if not self.gemini_api_key:
             problems.append("GEMINI_API_KEY не задан (аналитика и OCR работать не будут)")
         if not self.football_api_key:
-            problems.append("FOOTBALL_API_KEY не задан (будут демо-матчи)")
+            problems.append(
+                "FOOTBALL_API_KEY не задан — форма команд ограничена, "
+                "demo-матчи не используются без ALLOW_DEMO_DATA=1"
+            )
         if not self.odds_api_key:
-            problems.append("ODDS_API_KEY не задан (будут демо-коэффициенты)")
+            problems.append(
+                "ODDS_API_KEY не задан — прогнозы по линии отключены, "
+                "demo-коэффициенты не используются без ALLOW_DEMO_DATA=1"
+            )
         if "sqlite" in self.database_url:
             problems.append(
                 "DATABASE_URL указывает на SQLite — на эфемерном диске данные "
@@ -169,6 +184,7 @@ class Config:
             f"Gemini:    {'✅' if self.gemini_api_key else '❌'}\n"
             f"Football:  {'✅' if self.football_api_key else '❌'}\n"
             f"Odds:      {'✅' if self.odds_api_key else '❌'}\n"
+            f"Demo data: {'✅' if self.allow_demo_data else '❌'}\n"
             f"DB host:   {host}\n"
             f"Channel:   {self.channel_id or '—'}\n"
             f"Admin:     {self.admin_id or '—'}\n"

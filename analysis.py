@@ -333,12 +333,16 @@ def best_value_pick(home: str, away: str, odds: Odds,
 def best_guess_pick(home: str, away: str, odds: Odds,
                     model: dict, bank: float) -> Optional[Pick]:
     """
-    FALLBACK: если строгих value-ставок нет — мягкие фильтры
-    (edge ≥ -3%, conf ≥ 32%). Используется для показа пользователю.
+    FALLBACK: если строгих value-ставок нет — мягкие, но всё ещё плюсовые
+    фильтры. Используется только для личного показа пользователю; отрицательный
+    edge не показываем как ставку.
     """
     picks = build_value_picks(
         home, away, odds, model, bank,
-        min_edge=-0.03,
-        min_conf=0.32,
+        min_edge=0.0,
+        min_conf=0.38,
+        allowed_markets=config.allowed_signal_markets,
+        min_odds=config.min_signal_odds,
+        max_odds=config.max_signal_odds,
     )
     return picks[0] if picks else None

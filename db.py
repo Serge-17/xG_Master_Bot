@@ -62,6 +62,7 @@ class Signal(Base):
     book_odds = Column(Float, nullable=False)
     fair_odds = Column(Float, nullable=False)
     probability = Column(Float, nullable=False)         # 0..1
+    market_probability = Column(Float, default=0.0)     # fair prob рынка после снятия маржи
     confidence = Column(Integer, default=0)             # 0..100
     edge = Column(Float, default=0.0)                   # prob*book_odds - 1
     reasoning = Column(Text)
@@ -160,6 +161,7 @@ _SessionMaker: Optional[async_sessionmaker[AsyncSession]] = None
 # create_all только создаёт таблицы, не апдейтит существующие — поэтому
 # для добавленных колонок делаем idempotent ALTER TABLE.
 _SIGNAL_NEW_COLUMNS: dict[str, str] = {
+    "market_probability": "FLOAT DEFAULT 0",
     "sport_key": "VARCHAR(64)",
     "result_score": "VARCHAR(16)",
     "home_goals": "INTEGER",

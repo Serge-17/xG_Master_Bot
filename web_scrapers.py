@@ -50,6 +50,18 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _team_mentioned(team: str, text: str) -> bool:
+    haystack = _norm(text).lower()
+    tokens = [
+        token.lower()
+        for token in re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", team)
+        if len(token) >= 4
+    ]
+    if not tokens:
+        return bool(team and team.lower() in haystack)
+    return any(token in haystack for token in tokens)
+
+
 async def _fetch_text(url: str, timeout_s: int = 20) -> Optional[str]:
     timeout = aiohttp.ClientTimeout(total=timeout_s)
     try:
@@ -275,6 +287,10 @@ async def fetch_web_odds_and_context(home: str, away: str) -> tuple[Optional[Odd
         return None, MatchContext()
 
     odds, ctx = await scrape_sports_ru_odds(match_url)
+    if ctx.raw_text and not (_team_mentioned(home, ctx.raw_text) and _team_mentioned(away, ctx.raw_text)):
+        log.info("sports.ru context rejected: page does not mention both teams (%s vs %s)", home, away)
+        return None, MatchContext()
+
     ctx.injuries.extend(await scrape_team_injuries(home))
     ctx.injuries.extend(await scrape_team_injuries(away))
 

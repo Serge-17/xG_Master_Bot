@@ -118,14 +118,10 @@ async def _prepare_match_cache(match: Match, include_forms: bool = True) -> tupl
     stats: list[str] = []
     injuries: list[str] = []
 
-    web_odds, web_ctx = await fetch_web_odds_and_context(match.home, match.away)
-    if web_odds and web_odds.has_1x2():
-        live_odds = web_odds
-        source = "sports.ru"
-        source_url = web_ctx.source_url
-        facts = web_ctx.facts
-        stats = web_ctx.stats
-        injuries = web_ctx.injuries
+    api_odds = await fetch_odds(match.home, match.away)
+    if api_odds and api_odds.has_1x2():
+        live_odds = api_odds
+        source = "odds-api"
     elif snapshot:
         live_odds = Odds(
             home=snapshot.home,
@@ -139,11 +135,21 @@ async def _prepare_match_cache(match: Match, include_forms: bool = True) -> tupl
         )
         source = snapshot.source
         source_url = snapshot.source_url or source_url
-    else:
-        api_odds = await fetch_odds(match.home, match.away)
-        if api_odds and api_odds.has_1x2():
-            live_odds = api_odds
-            source = "odds-api"
+
+    web_odds, web_ctx = await fetch_web_odds_and_context(match.home, match.away)
+    if web_ctx.source_url:
+        source_url = web_ctx.source_url
+        facts = web_ctx.facts
+        stats = web_ctx.stats
+        injuries = web_ctx.injuries
+    if (
+        live_odds is None
+        and config.allow_web_odds_fallback
+        and web_odds
+        and web_odds.has_1x2()
+    ):
+        live_odds = web_odds
+        source = "sports.ru"
 
     if include_forms:
         home_form, away_form = await asyncio.gather(
@@ -282,6 +288,7 @@ async def scan_and_build_signals(bank: float, limit: int = 25
             book_odds=pick.book_odds,
             fair_odds=pick.fair_odds,
             probability=pick.probability,
+            market_probability=pick.market_probability,
             confidence=int(round(pick.probability * 100)),
             edge=pick.edge,
             reasoning=meta["reasoning"],
